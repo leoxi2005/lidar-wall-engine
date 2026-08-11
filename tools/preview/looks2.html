@@ -1,0 +1,496 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<title>LiDAR Wall — hướng visual, đợt 2</title>
+<style>
+  :root { color-scheme: dark; }
+  html,body { margin:0; background:#07080c; color:#c8d4e4;
+    font:13px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .wrap { max-width:1500px; margin:0 auto; padding:18px 20px 40px; }
+  h1 { font-size:15px; font-weight:600; letter-spacing:.14em; color:#8fb8dd; margin:0 0 4px; }
+  .sub { color:#5d6b80; margin:0 0 16px; }
+  canvas { display:block; width:100%; border-radius:6px; background:#000; cursor:crosshair; touch-action:none; }
+  .bar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:14px 0 10px; }
+  button { font:inherit; color:#b9c9dc; background:#131722; border:1px solid #26304a;
+           padding:7px 14px; border-radius:5px; cursor:pointer; }
+  button:hover { border-color:#3d5686; color:#e6f0fb; }
+  button.on { background:#1d2942; border-color:#5b83c8; color:#eaf3ff; }
+  .desc { color:#7e8ea6; margin:12px 0 0; max-width:80ch; }
+  .desc b { color:#a9c4e2; font-weight:600; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>LiDAR WALL — hướng visual, đợt 2</h1>
+  <p class="sub">Đợt 1 toàn "một bề mặt phản ứng". Bốn cái này khác THỂ LOẠI: sinh vật, sự tích luỹ,
+    năng lượng nối giữa người, và chiều sâu. Giữ chuột kéo để giả làm bàn tay.</p>
+
+  <div class="bar">
+    <button data-look="0" class="on">1 · ĐÀN CHIM</button>
+    <button data-look="1">2 · VƯỜN MỌC</button>
+    <button data-look="2">3 · SÉT</button>
+    <button data-look="3">4 · CHIỀU SÂU</button>
+    <span style="flex:1"></span>
+    <button id="viewBtn">Đang xem: 1 TƯỜNG (560×240)</button>
+    <button id="clearBtn">Xoá</button>
+  </div>
+
+  <canvas id="c"></canvas>
+  <p class="desc" id="desc"></p>
+</div>
+
+<script>
+const DESCS = [
+ '<b>ĐÀN CHIM</b> — hàng nghìn con bay thành đàn cuộn khắp phòng, cả đàn chuyển hướng cùng lúc như murmuration thật. Đưa tay vào là chúng <em>tán loạn né ra</em>, để lại một khoảng trống hình bàn tay, rồi khép lại sau vài giây. Quẹt ngang = xẻ đôi cả đàn. Không phải bề mặt — là sinh vật, nên khách hiểu ngay mình vừa làm gì.',
+ '<b>VƯỜN MỌC</b> — quẹt tay là <em>gieo một nhánh cây</em>: nó mọc tiếp, phân nhánh, ra hoa sáng ở đầu cành. Và nó <b>ở lại</b> — suốt buổi tối căn phòng dần phủ kín bởi thứ do chính khách vẽ nên. Người đến sau thấy vườn của người đến trước, và mọc thêm vào đó. Cả phòng là một tác phẩm tập thể chứ không phải hiệu ứng lặp lại.',
+ '<b>SÉT</b> — từ mỗi bàn tay phóng ra những tia điện bò trên tường, chớp và tắt liên tục. <b>Hai người đứng gần nhau thì một tia nối thẳng giữa hai tay</b> — càng gần càng dày. Quẹt = kéo lê cả chùm tia theo tay. Kịch tính nhất, và tương tác giữa người với người là thứ nhìn phát hiểu.',
+ '<b>CHIỀU SÂU</b> — tường không còn là tường mà là <em>cửa sổ nhìn vào một khối sâu</em>: nhiều lớp bụi sáng ở các độ sâu khác nhau, trôi lệch nhau nên có cảm giác không gian thật phía sau. Tay chạm vào <b>vén lớp gần ra</b> như vén rèm, để lộ lớp sâu bên trong đang sáng. Ảo nhất về không gian.'
+];
+
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl2', { alpha:false, antialias:false });
+if (!gl || !gl.getExtension('EXT_color_buffer_float')) {
+  document.body.innerHTML = '<p style="padding:40px">Trình duyệt thiếu WebGL2 hoặc float render target.</p>';
+}
+
+const ASPECT = 10350/1080, WALL = 560/240;
+let viewFull = false, look = 0;
+
+// ---------------------------------------------------------------- gl helpers
+const VS = `#version 300 es
+layout(location=0) in vec2 a; out vec2 vUv; out vec2 vL; out vec2 vR; out vec2 vT; out vec2 vB;
+uniform vec2 uTexel;
+void main(){ vUv=a*0.5+0.5; vL=vUv-vec2(uTexel.x,0.); vR=vUv+vec2(uTexel.x,0.);
+  vT=vUv+vec2(0.,uTexel.y); vB=vUv-vec2(0.,uTexel.y); gl_Position=vec4(a,0.,1.); }`;
+const HEAD = `#version 300 es
+precision highp float; precision highp sampler2D;
+in vec2 vUv; in vec2 vL; in vec2 vR; in vec2 vT; in vec2 vB; out vec4 o;
+float h21(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453123); }
+float h11(float p){ return fract(sin(p*127.1)*43758.5453123); }
+float vn(vec2 x){ vec2 i=floor(x),f=fract(x); vec2 u=f*f*(3.-2.*f);
+  return mix(mix(h21(i),h21(i+vec2(1,0)),u.x),mix(h21(i+vec2(0,1)),h21(i+vec2(1,1)),u.x),u.y); }
+float fbm(vec2 x){ float s=0.,a=.5; for(int i=0;i<4;i++){ s+=a*vn(x); x*=2.03; a*=.5; } return s; }
+vec4 fs(sampler2D s, vec2 uv, vec2 tx){ vec2 h=tx*0.9;
+  return 0.25*(texture(s,uv+vec2(h.x,h.y))+texture(s,uv+vec2(-h.x,h.y))
+              +texture(s,uv+vec2(h.x,-h.y))+texture(s,uv+vec2(-h.x,-h.y))); }
+`;
+function sh(t,src){ const s=gl.createShader(t); gl.shaderSource(s,src); gl.compileShader(s);
+  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; }
+function link(vs,fs_){ const p=gl.createProgram(); gl.attachShader(p,sh(gl.VERTEX_SHADER,vs));
+  gl.attachShader(p,sh(gl.FRAGMENT_SHADER,fs_)); gl.linkProgram(p);
+  if(!gl.getProgramParameter(p,gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p)); return p; }
+const prog = f => link(VS,f);
+function fbo(w,h){ const t=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,t);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA16F,w,h,0,gl.RGBA,gl.HALF_FLOAT,null);
+  const f=gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER,f);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,t,0);
+  gl.viewport(0,0,w,h); gl.clearColor(0,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null); return {t,f,w,h,tx:1/w,ty:1/h}; }
+function dbl(w,h){ let a=fbo(w,h),b=fbo(w,h);
+  return { get read(){return a;}, get write(){return b;}, swap(){const t=a;a=b;b=t;}, tx:1/w, ty:1/h }; }
+const vao=gl.createVertexArray(); gl.bindVertexArray(vao);
+const vbo=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,vbo);
+gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
+function blit(t){ gl.bindVertexArray(vao);
+  if(t){ gl.viewport(0,0,t.w,t.h); gl.bindFramebuffer(gl.FRAMEBUFFER,t.f); }
+  else { gl.viewport(0,0,canvas.width,canvas.height); gl.bindFramebuffer(gl.FRAMEBUFFER,null); }
+  gl.drawArrays(gl.TRIANGLES,0,3); }
+const U=(p,n)=>gl.getUniformLocation(p,n);
+
+// ---------------------------------------------------------------- garden buffer (look 2)
+// A deposit field with a very long decay, so what visitors draw ACCUMULATES over an
+// evening instead of resetting every few seconds. That persistence is the whole idea of
+// the growth look, and it is the one thing none of the other looks needs.
+const SIM_H=220, SIM_W=Math.round(SIM_H*ASPECT);
+const garden = dbl(SIM_W,SIM_H);
+const pDeposit = prog(HEAD+`uniform sampler2D uT; uniform float uA,uR,uAmt; uniform vec2 uP; uniform vec3 uC;
+void main(){ vec2 p=vUv-uP; p.x-=round(p.x); p.x*=uA;
+  float g=exp(-dot(p,p)/uR)*uAmt; vec4 pr=texture(uT,vUv);
+  float na=min(pr.a+g,1.6); vec3 c=mix(pr.rgb,uC,clamp(g/max(na,1e-4),0.,1.)); o=vec4(c,na); }`);
+const pDecay = prog(HEAD+`uniform sampler2D uT; uniform float uD; void main(){ o=texture(uT,vUv)*uD; }`);
+function deposit(x,y,c,amt,r){
+  gl.useProgram(pDeposit); gl.uniform2f(U(pDeposit,'uTexel'),garden.tx,garden.ty);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,garden.read.t); gl.uniform1i(U(pDeposit,'uT'),0);
+  gl.uniform1f(U(pDeposit,'uA'),ASPECT); gl.uniform2f(U(pDeposit,'uP'),x,y);
+  gl.uniform1f(U(pDeposit,'uR'),r*r); gl.uniform1f(U(pDeposit,'uAmt'),amt);
+  gl.uniform3f(U(pDeposit,'uC'),c[0],c[1],c[2]);
+  blit(garden.write); garden.swap();
+}
+function decayGarden(dt){
+  gl.useProgram(pDecay); gl.uniform2f(U(pDecay,'uTexel'),garden.tx,garden.ty);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,garden.read.t); gl.uniform1i(U(pDecay,'uT'),0);
+  gl.uniform1f(U(pDecay,'uD'),Math.exp(-dt/90.0));    // ~1.5 phút, đủ để tích thành vườn
+  blit(garden.write); garden.swap();
+}
+
+// ---------------------------------------------------------------- point layer (birds)
+const PT_VS = `#version 300 es
+layout(location=0) in vec2 aPos; layout(location=1) in float aSize;
+layout(location=2) in float aAng; layout(location=3) in vec3 aTint;
+out vec3 vTint; out float vAng;
+void main(){ vTint=aTint; vAng=aAng; gl_PointSize=max(aSize,2.0);
+  gl_Position=vec4(aPos*2.0-1.0,0.,1.); }`;
+// A bird is a chevron, not a dot. Rotating it to the heading is what turns a cloud of
+// specks into a flock that is visibly GOING somewhere.
+const PT_FS = `#version 300 es
+precision highp float; in vec3 vTint; in float vAng; out vec4 o;
+void main(){
+  vec2 q=gl_PointCoord-0.5; float c=cos(vAng),s=sin(vAng);
+  q=vec2(q.x*c+q.y*s, -q.x*s+q.y*c);
+  float wing = exp(-pow(abs(q.y)*7.0 - abs(q.x)*3.2, 2.0)*2.2);
+  float body = exp(-dot(vec2(q.x/0.42,q.y/0.10),vec2(q.x/0.42,q.y/0.10))*3.0);
+  float a=clamp(wing*0.75+body,0.0,1.0)*smoothstep(0.72,0.42,length(gl_PointCoord-0.5));
+  o=vec4(vTint*a,1.0);
+}`;
+const ptProg = link(PT_VS,PT_FS);
+const PT_F = 7;
+const NBIRD = 2600;
+const bird = {
+  x:new Float32Array(NBIRD), y:new Float32Array(NBIRD),
+  vx:new Float32Array(NBIRD), vy:new Float32Array(NBIRD),
+  g:new Int32Array(NBIRD), s:new Float32Array(NBIRD), flee:new Float32Array(NBIRD),
+  data:new Float32Array(NBIRD*PT_F)
+};
+const NFLOCK=5, fx=new Float32Array(NFLOCK), fy=new Float32Array(NFLOCK), fp=new Float32Array(NFLOCK);
+for(let g=0;g<NFLOCK;g++){ fx[g]=Math.random(); fy[g]=0.25+Math.random()*0.5; fp[g]=Math.random()*100; }
+for(let i=0;i<NBIRD;i++){ const g=i%NFLOCK; bird.g[i]=g; bird.s[i]=Math.random();
+  bird.x[i]=(fx[g]+(Math.random()-0.5)*0.05+1)%1; bird.y[i]=fy[g]+(Math.random()-0.5)*0.14; }
+const ptVao=gl.createVertexArray(); gl.bindVertexArray(ptVao);
+const ptVbo=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,ptVbo);
+gl.bufferData(gl.ARRAY_BUFFER,bird.data.byteLength,gl.DYNAMIC_DRAW);
+const st=PT_F*4;
+gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0,2,gl.FLOAT,false,st,0);
+gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1,1,gl.FLOAT,false,st,8);
+gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2,1,gl.FLOAT,false,st,12);
+gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3,3,gl.FLOAT,false,st,16);
+gl.bindVertexArray(null);
+
+function updateBirds(dt,t,hands){
+  for(let g=0;g<NFLOCK;g++){
+    fx[g]=(fx[g]+0.030*Math.sin(t*0.13+fp[g])*dt+1)%1;
+    fy[g]=Math.min(0.86,Math.max(0.16, fy[g]+0.016*Math.sin(t*0.19+fp[g]*1.7)*dt));
+  }
+  const px=Math.min(2,window.devicePixelRatio||1)*0.010*canvas.height;
+  for(let i=0;i<NBIRD;i++){
+    const g=bird.g[i], s=bird.s[i];
+    let x=bird.x[i], y=bird.y[i];
+    // Each bird holds its own STATION inside the flock, slowly circling. Without this
+    // they all steer at one point and the flock collapses into a bright blob.
+    const ang = s*6.283 + t*(0.18+0.35*s);
+    const rad = 0.20*Math.sqrt(s);       // sqrt fills the DISC; plain s leaves a ring
+    let tx=fx[g]+Math.cos(ang)*rad*0.55;
+    let ty=fy[g]+Math.sin(ang)*rad;
+    let dx=tx-x; dx-=Math.round(dx);
+    let ax=dx*ASPECT*0.42, ay=(ty-y)*0.42;
+
+    let panic=0;
+    for(const h of hands){
+      let hx=x-h.x; hx-=Math.round(hx); const hy=y-h.y;
+      const d=Math.hypot(hx*ASPECT,hy); if(d>0.95) continue;
+      const f=1-d/0.95, inv=1/Math.max(d,0.035);
+      ax+=hx*ASPECT*inv*0.85*f*f; ay+=hy*inv*0.85*f*f;
+      if(f>panic) panic=f;
+    }
+    bird.flee[i]=Math.max(panic,bird.flee[i]-dt/2.2);
+
+    let vx=bird.vx[i]+(ax/ASPECT)*dt, vy=bird.vy[i]+ay*dt;
+    const sp=Math.hypot(vx*ASPECT,vy), max=0.30*(0.7+0.6*s)*(1+bird.flee[i]*2.2);
+    if(sp>max){ const k=max/sp; vx*=k; vy*=k; }
+    const dmp=Math.exp(-dt/0.55); vx*=dmp; vy*=dmp;
+    bird.vx[i]=vx; bird.vy[i]=vy;
+    x+=vx*dt; y+=vy*dt; x-=Math.floor(x);
+    if(y<0.07){ y=0.07; bird.vy[i]=Math.abs(vy); }
+    if(y>0.93){ y=0.93; bird.vy[i]=-Math.abs(vy); }
+    bird.x[i]=x; bird.y[i]=y;
+
+    // 2600 additive sprites overlap hard; keep each one dim so a dense patch reads as a
+    // flock rather than a white hole.
+    const k=(0.16+0.42*bird.flee[i]);
+    const o2=i*PT_F;
+    bird.data[o2]=x; bird.data[o2+1]=y;
+    bird.data[o2+2]=px*(0.75+0.5*s);
+    bird.data[o2+3]=Math.atan2(vy,vx*ASPECT);
+    bird.data[o2+4]=0.55*k; bird.data[o2+5]=0.68*k; bird.data[o2+6]=0.95*k;
+  }
+}
+function drawBirds(){
+  gl.bindVertexArray(ptVao); gl.bindBuffer(gl.ARRAY_BUFFER,ptVbo);
+  gl.bufferSubData(gl.ARRAY_BUFFER,0,bird.data);
+  gl.useProgram(ptProg); gl.enable(gl.BLEND); gl.blendFunc(gl.ONE,gl.ONE);
+  gl.drawArrays(gl.POINTS,0,NBIRD); gl.disable(gl.BLEND); gl.bindVertexArray(null);
+}
+
+// ---------------------------------------------------------------- growth agents (look 2)
+let tips=[];
+function seedGrowth(x,y,c){
+  if(tips.length>220) return;
+  const n=1+((Math.random()*2)|0);
+  for(let i=0;i<n;i++) tips.push({x,y,dir:Math.random()*6.283,life:3.5+Math.random()*3,gen:0,c});
+}
+function growTips(dt){
+  if(!tips.length) return;
+  const next=[];
+  for(const t of tips){
+    t.life-=dt; if(t.life<=0) continue;
+    // Branches curl upward: gravity in reverse is what makes it read as growing rather
+    // than radiating.
+    t.dir += (Math.random()-0.5)*2.4*dt*3 + (Math.sin(t.dir)>0 ? 0 : 0) ;
+    t.dir += (0.9 - Math.sin(t.dir)) * 0.35 * dt;
+    const step=0.16*dt;
+    t.x=(t.x+Math.cos(t.dir)*step/ASPECT+1)%1;
+    t.y=Math.min(0.97,Math.max(0.03,t.y+Math.sin(t.dir)*step));
+    deposit(t.x,t.y,t.c,2.6*dt,0.018);
+    if(t.gen<4 && Math.random()<1.1*dt && tips.length+next.length<220){
+      next.push({x:t.x,y:t.y,dir:t.dir+(Math.random()<0.5?-1:1)*(0.5+Math.random()*0.6),
+                 life:t.life*0.7,gen:t.gen+1,c:t.c});
+    }
+    // A bloom at the tip when it stops — the reward for having drawn the branch.
+    if(t.life<dt*2) deposit(t.x,t.y,[1.0,0.85,0.55],1.6,0.030);
+    next.push(t);
+  }
+  tips=next;
+}
+
+// ---------------------------------------------------------------- looks
+const DHEAD = HEAD + `
+uniform sampler2D uGarden;
+uniform vec2 uSimTexel, uView;
+uniform float uT, uA;
+uniform vec4 uHands[8]; uniform vec3 uHandCols[8]; uniform int uN;
+vec2 pano(){ return vec2(uView.y + vUv.x*uView.x, vUv.y); }
+float segd(vec2 p, vec2 a, vec2 b){ vec2 pa=p-a, ba=b-a;
+  float h=clamp(dot(pa,ba)/dot(ba,ba),0.,1.); return length(pa-ba*h); }
+`;
+
+const LOOKS = [
+// ---- 1. BIRDS: shader draws only the sky; the flock is the point layer ------------
+DHEAD + `
+void main(){
+  vec2 uv=pano(); vec2 p=vec2(uv.x*uA,uv.y);
+  float d = fbm(p*0.55 + vec2(uT*0.010,0.0));
+  vec3 c = mix(vec3(0.010,0.014,0.026), vec3(0.030,0.042,0.075), d);
+  c += vec3(0.02,0.03,0.05)*smoothstep(0.55,1.0,uv.y);
+  o=vec4(c,1.0);
+}`,
+
+// ---- 2. GROWTH -------------------------------------------------------------------
+DHEAD + `
+void main(){
+  vec2 uv=pano();
+  vec4 g = fs(uGarden,uv,uSimTexel);
+  float a = g.a;
+
+  // Thin the deposit into a STEM: a blob becomes a branch by keeping only the ridge and
+  // shading its shoulders.
+  float core = smoothstep(0.16,0.55,a);
+  float edge = smoothstep(0.04,0.20,a) - core;
+  vec2 gr = vec2(dFdx(a),dFdy(a))*260.0;
+  float lit = clamp(dot(normalize(vec3(-gr.x,-gr.y,1.0)), normalize(vec3(-0.4,0.7,0.6))),0.0,1.0);
+
+  vec3 stem = g.rgb;
+  vec3 c = vec3(0.006,0.009,0.014);
+  c += stem * core * (0.55 + 0.85*lit);
+  c += stem * edge * 0.22;
+  c += vec3(1.0,0.92,0.72) * pow(max(a-0.9,0.0),1.4) * 2.2;   // blossoms at the tips
+  c += stem * exp(-a*6.0) * 0.02;
+
+  // Hands leave a soft light so you can see where you are about to plant.
+  for(int i=0;i<8;i++){ if(i>=uN) break;
+    vec2 d=vec2(uv.x-uHands[i].x, uv.y-uHands[i].y); d.x-=round(d.x); d.x*=uA;
+    c += uHandCols[i]*exp(-dot(d,d)*90.0)*0.35; }
+
+  float v=smoothstep(0.0,0.10,vUv.y)*smoothstep(0.0,0.09,1.0-vUv.y);
+  o=vec4(pow(clamp(c*mix(1.0,v,0.30),0.0,1.0),vec3(0.92)),1.0);
+}`,
+
+// ---- 3. LIGHTNING ----------------------------------------------------------------
+DHEAD + `
+// A bolt is a straight segment measured in a WARPED space: displacing the sample point by
+// noise before measuring distance is what gives the jagged path, for the cost of one
+// distance test instead of tracing a polyline.
+float bolt(vec2 p, vec2 a, vec2 b, float seed, float t){
+  vec2 q = p + vec2(fbm(p*7.0 + seed*13.0 + t*1.7)-0.5,
+                    fbm(p*7.0 + seed*29.0 - t*1.3)-0.5) * 0.050;
+  float d = segd(q,a,b);
+  return d;
+}
+void main(){
+  vec2 uv=pano(); vec2 p=vec2(uv.x*uA,uv.y);
+  vec3 c = vec3(0.006,0.008,0.016);
+  c += vec3(0.02,0.03,0.06)*fbm(p*0.6+uT*0.02);
+
+  for(int i=0;i<8;i++){
+    if(i>=uN) break;
+    vec2 hi = vec2(uHands[i].x*uA, uHands[i].y);
+
+    // Tendrils crawling out from the hand, re-aimed a few times a second so they flicker
+    // like a real discharge instead of sitting still.
+    for(int k=0;k<3;k++){
+      float sd = float(i)*7.0+float(k)*3.0;
+      float step = floor(uT*7.0 + sd);
+      float ang = h11(step+sd)*6.283;
+      float len = 0.35 + 0.55*h11(step+sd+91.0);
+      vec2 e = hi + vec2(cos(ang),sin(ang))*len;
+      float d = bolt(p, hi, e, sd, uT);
+      float life = 0.35 + 0.65*h11(step+sd+7.0);
+      c += uHandCols[i] * exp(-d*34.0) * 2.2 * life;
+      c += vec3(1.0) * exp(-d*90.0) * 1.1 * life;
+      c += uHandCols[i] * exp(-d*6.5) * 0.14 * life;
+    }
+
+    // Hand to hand: the closer two people stand, the thicker the arc between them. This
+    // is the whole reason the look exists — it makes two visitors part of one circuit.
+    for(int j=0;j<8;j++){
+      if(j>=uN || j<=i) break;
+      vec2 hj = vec2(uHands[j].x*uA, uHands[j].y);
+      float sep = length(hj-hi);
+      if(sep > 3.2) continue;
+      float k2 = smoothstep(3.2,0.6,sep);
+      float d = bolt(p, hi, hj, float(i*8+j), uT*1.6);
+      vec3 mixc = (uHandCols[i]+uHandCols[j])*0.5;
+      c += mixc * exp(-d*26.0) * 3.0 * k2;
+      c += vec3(1.0) * exp(-d*75.0) * 1.6 * k2;
+      c += mixc * exp(-d*5.5) * 0.26 * k2;
+    }
+
+    float dh = length(p-hi);
+    c += uHandCols[i]*exp(-dh*dh*45.0)*0.9;
+  }
+
+  o=vec4(pow(clamp(c,0.0,1.0),vec3(0.90)),1.0);
+}`,
+
+// ---- 4. DEPTH --------------------------------------------------------------------
+DHEAD + `
+// Layers at different depths, each parallaxed by a different amount. The eye is nudged by
+// where the hands are, so the whole volume shifts as people move — that motion is what
+// makes it read as depth rather than as a stack of textures.
+// Nearer layers move MORE and are sparser; brightness is set per layer rather than
+// derived from depth, because dividing by z² blows the near layers to white.
+vec3 layer(vec2 uv, float z, float seed, vec3 col, vec2 eye, float gain, float dustGain){
+  vec2 q = uv + eye*(0.55/z);
+  vec2 p = vec2(q.x*uA, q.y)*(1.5/z);
+  float n = fbm(p*1.6 + seed + vec2(uT*0.02/z,0.0));
+  float dust = pow(max(vn(p*18.0+seed*3.0),0.0), 11.0) * dustGain;
+  float cloud = smoothstep(0.60,0.98,n);
+  return col * (cloud*0.22 + dust) * gain;
+}
+void main(){
+  vec2 uv=pano();
+
+  vec2 eye=vec2(0.0);
+  float openTotal=0.0;
+  for(int i=0;i<8;i++){ if(i>=uN) break;
+    vec2 d=vec2(uv.x-uHands[i].x,uv.y-uHands[i].y); d.x-=round(d.x); d.x*=uA;
+    eye += vec2(uHands[i].x-0.5, uHands[i].y-0.5)*0.05;
+    openTotal += exp(-dot(d,d)*22.0);
+  }
+  float open = clamp(openTotal,0.0,1.0);
+
+  vec3 c = vec3(0.004,0.006,0.013);
+  c += layer(uv,1.00,3.7, vec3(0.10,0.30,0.85), eye, 0.55, 0.9);   // deep
+  c += layer(uv,0.68,11.2,vec3(0.35,0.55,1.00), eye, 0.34, 0.8);
+  c += layer(uv,0.44,29.5,vec3(0.75,0.55,1.00), eye, 0.20, 0.7);
+  // The nearest layer is PARTED by a hand, like drawing a curtain aside — that is the
+  // interaction, and it reveals the lit depth behind.
+  c += layer(uv,0.27,53.1,vec3(0.85,0.90,1.00), eye, 0.13, 0.6) * (1.0-open*0.95);
+  c += vec3(0.25,0.55,1.0) * open * 0.30;
+
+  for(int i=0;i<8;i++){ if(i>=uN) break;
+    vec2 d=vec2(uv.x-uHands[i].x,uv.y-uHands[i].y); d.x-=round(d.x); d.x*=uA;
+    float r=length(d);
+    c += uHandCols[i]*exp(-r*r*140.0)*0.55;
+    c += uHandCols[i]*exp(-pow((r-0.34)*11.0,2.0))*0.20;         // rim of the parted hole
+  }
+
+  float v=smoothstep(0.0,0.10,vUv.y)*smoothstep(0.0,0.09,1.0-vUv.y);
+  o=vec4(pow(clamp(c*mix(1.0,v,0.25),0.0,1.0),vec3(0.90)),1.0);
+}`
+];
+const progs = LOOKS.map(prog);
+
+// ---------------------------------------------------------------- hands
+const PAL=[[0.30,0.85,1.0],[0.55,0.45,1.0],[1.0,0.45,0.70],[1.0,0.75,0.35],[0.45,1.0,0.75]];
+// Inside the default (single-wall) view, which spans panorama x ≈ 0.44–0.56. Placing them
+// across the whole room makes every look appear dead, because all the interaction happens
+// off-screen.
+const demo=[
+  {id:0,cx:0.478,cy:0.55,ax:0.022,ay:0.16,sx:0.35,sy:0.59,ph:0.0,x:0,y:0,first:true},
+  {id:1,cx:0.527,cy:0.45,ax:0.028,ay:0.20,sx:0.61,sy:0.39,ph:2.4,x:0,y:0,first:true}
+];
+let mouse=null;
+function viewSlice(){ const view=viewFull?ASPECT:WALL, w=view/ASPECT; return {w, x: viewFull?0:0.5-w/2}; }
+function toPano(e){ const r=canvas.getBoundingClientRect(), s=viewSlice();
+  return { x:s.x+((e.clientX-r.left)/r.width)*s.w, y:1-(e.clientY-r.top)/r.height }; }
+canvas.addEventListener('pointerdown',e=>{ const p=toPano(e);
+  mouse={x:p.x,y:p.y,id:(Math.random()*5)|0}; seedGrowth(p.x,p.y,PAL[mouse.id]);
+  try{canvas.setPointerCapture(e.pointerId);}catch(_){} });
+canvas.addEventListener('pointermove',e=>{ if(!mouse) return; const p=toPano(e);
+  let dx=p.x-mouse.x; dx-=Math.round(dx);
+  mouse.run=(mouse.run||0)+Math.hypot(dx*ASPECT,p.y-mouse.y);
+  if(mouse.run>0.045){ mouse.run=0; seedGrowth(p.x,p.y,PAL[mouse.id]); }
+  mouse.x=p.x; mouse.y=p.y; });
+window.addEventListener('pointerup',()=>{ mouse=null; });
+
+document.querySelectorAll('[data-look]').forEach(b=>b.addEventListener('click',()=>{
+  document.querySelectorAll('[data-look]').forEach(x=>x.classList.remove('on'));
+  b.classList.add('on'); look=+b.dataset.look; document.getElementById('desc').innerHTML=DESCS[look]; }));
+document.getElementById('viewBtn').addEventListener('click',e=>{ viewFull=!viewFull;
+  e.target.textContent=viewFull?'Đang xem: CẢ 5 TƯỜNG (10350×1080)':'Đang xem: 1 TƯỜNG (560×240)'; resize(); });
+document.getElementById('clearBtn').addEventListener('click',()=>{ tips=[];
+  for(const t of [garden.read,garden.write]){ gl.bindFramebuffer(gl.FRAMEBUFFER,t.f);
+    gl.clearColor(0,0,0,0); gl.clear(gl.COLOR_BUFFER_BIT); } gl.bindFramebuffer(gl.FRAMEBUFFER,null); });
+document.getElementById('desc').innerHTML=DESCS[0];
+
+function resize(){ const w=canvas.clientWidth, view=viewFull?ASPECT:WALL;
+  const h=Math.round(w/view); canvas.style.height=h+'px';
+  const dpr=Math.min(2,window.devicePixelRatio||1);
+  canvas.width=Math.round(w*dpr); canvas.height=Math.round(h*dpr); }
+window.addEventListener('resize',resize);
+
+const hb=new Float32Array(32), cb=new Float32Array(24);
+let t0=performance.now(), last=t0;
+function frame(){
+  requestAnimationFrame(frame); resize();
+  const now=performance.now(); const dt=Math.min(Math.max((now-last)/1000,1/240),1/20); last=now;
+  const t=(now-t0)/1000;
+
+  const hands=[];
+  for(const h of demo){
+    const x=(h.cx+h.ax*Math.sin(t*h.sx+h.ph)+1)%1, y=h.cy+h.ay*Math.sin(t*h.sy+h.ph*1.7);
+    if(h.first){h.x=x;h.y=y;h.first=false;}
+    if(look===1){ let dx=x-h.x; dx-=Math.round(dx);
+      h.run=(h.run||0)+Math.hypot(dx*ASPECT,y-h.y);
+      if(h.run>0.045){ h.run=0; seedGrowth(x,y,PAL[h.id]); } }
+    h.x=x; h.y=y; hands.push({x,y,id:h.id});
+  }
+  if(mouse) hands.push({x:mouse.x,y:mouse.y,id:mouse.id});
+
+  if(look===0) updateBirds(dt,t,hands);
+  if(look===1){ growTips(dt); decayGarden(dt); }
+
+  const p=progs[look]; gl.useProgram(p); const s=viewSlice();
+  hb.fill(0); cb.fill(0);
+  hands.slice(0,8).forEach((h,i)=>{ hb[i*4]=h.x; hb[i*4+1]=h.y; hb[i*4+3]=1;
+    const c=PAL[h.id%PAL.length]; cb[i*3]=c[0]; cb[i*3+1]=c[1]; cb[i*3+2]=c[2]; });
+  gl.uniform2f(U(p,'uTexel'),1/canvas.width,1/canvas.height);
+  gl.uniform2f(U(p,'uSimTexel'),garden.tx,garden.ty);
+  gl.uniform2f(U(p,'uView'),s.w,s.x);
+  gl.uniform1f(U(p,'uT'),t); gl.uniform1f(U(p,'uA'),ASPECT);
+  gl.uniform4fv(U(p,'uHands'),hb); gl.uniform3fv(U(p,'uHandCols'),cb);
+  gl.uniform1i(U(p,'uN'),Math.min(hands.length,8));
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,garden.read.t); gl.uniform1i(U(p,'uGarden'),0);
+  blit(null);
+
+  if(look===0) drawBirds();
+}
+resize(); frame();
+</script>
+</body>
+</html>
