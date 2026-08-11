@@ -1,0 +1,26 @@
+{
+  "name": "lidar-wall-engine",
+  "version": "0.1.0",
+  "description": "Khung dựng tác phẩm tương tác chạm-tường: Hokuyo LiDAR → LiDAR Bridge → OSC → visual → nhiều luồng NDI. Hiệu chỉnh 4 điểm, giữ fps tự động.",
+  "main": "engine/main.js",
+  "author": "LEOXI",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "import-preset": "node tools/import-preset.js",
+    "build:mac": "electron-builder --mac",
+    "build:win": "electron-builder --win"
+  },
+  "build": {
+    "appId": "com.leoxi.lidarwall",
+    "productName": "LiDAR Wall",
+    "directories": { "output": "release", "buildResources": "build" },
+    "files": ["engine/**/*", "visuals/**/*", "rooms/**/*", "package.json"],
+    "asarUnpack": ["**/node_modules/@stagetimerio/grandiose/**"],
+    "mac": { "category": "public.app-category.graphics-design", "target": ["dmg", "zip"] },
+    "win": { "target": ["nsis", "zip"] },
+    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true }
+  },
+  "dependencies": { "@stagetimerio/grandiose": "^0.2.0" },
+  "devDependencies": { "electron": "^33.2.0", "electron-builder": "^25.1.8" }
+}

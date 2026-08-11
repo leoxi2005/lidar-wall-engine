@@ -1,0 +1,76 @@
+{
+  "name": "bali-pentagon",
+  "visual": "waves",
+  "room": {
+    "height": 1080,
+    "wrap": true,
+    "walls": [
+      {
+        "name": "Mặt 1",
+        "oscPrefix": "tuong1",
+        "ndiName": "DOOR-WALL-1",
+        "wcm": 180,
+        "hcm": 240,
+        "px": 810
+      },
+      {
+        "name": "Mặt 2",
+        "oscPrefix": "tuong2",
+        "ndiName": "DOOR-WALL-2",
+        "wcm": 560,
+        "hcm": 240,
+        "px": 2520
+      },
+      {
+        "name": "Mặt 3",
+        "oscPrefix": "tuong3",
+        "ndiName": "DOOR-WALL-3",
+        "wcm": 440,
+        "hcm": 240,
+        "px": 1980
+      },
+      {
+        "name": "Mặt 4",
+        "oscPrefix": "tuong4",
+        "ndiName": "DOOR-WALL-4",
+        "wcm": 500,
+        "hcm": 240,
+        "px": 2250
+      },
+      {
+        "name": "Mặt 5",
+        "oscPrefix": "tuong5",
+        "ndiName": "DOOR-WALL-5",
+        "wcm": 620,
+        "hcm": 240,
+        "px": 2790
+      }
+    ]
+  },
+  "output": {
+    "fps": 30,
+    "renderScale": 1,
+    "maxFps": 60,
+    "fpsFloor": 45,
+    "fpsCeiling": 60,
+    "autoQuality": true,
+    "kiosk": false
+  },
+  "ndi": {
+    "enabled": true,
+    "pbo": 4
+  },
+  "osc": {
+    "port": 7000,
+    "flipY": true,
+    "trackTimeout": 0.5,
+    "stitchSeconds": 0.7,
+    "stitchRadius": 0.3
+  },
+  "fields": {
+    "simHeight": 320,
+    "substeps": 3,
+    "trailHold": 3
+  },
+  "params": {}
+}

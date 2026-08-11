@@ -1,0 +1,293 @@
+// GLSL for the WAVES visual. ES 3.00 (WebGL2).
+//
+// The picture is a contour map of ONE height field, built from three layers:
+//
+//   base   procedural swell, evaluated full-resolution, so the wall is alive when the
+//          room is empty  (here)
+//   wave   a real 2D wave equation — ripples that travel, reflect, and interfere
+//          (engine: Fields)
+//   trail  a slowly-decaying deposit along every hand's path, so a swipe leaves a RIDGE
+//          that the contour lines bend around  (engine: Fields)
+//
+// Simulating the ripples rather than drawing analytic rings is what buys the good
+// behaviour for free: two people's waves add up on their own, the moiré where they meet
+// is real interference, and a wave still crossing the room after its owner walked away
+// costs nothing extra.
+//
+// THE ONE GEOMETRIC FACT EVERYTHING OBEYS: the domain is PERIODIC IN X. The five walls
+// close into a pentagon, so uv.x = 1 is the same physical edge as uv.x = 0. Every sim
+// texture wraps on S, and any distance measured in x takes the short way round.
+//
+// NO BACKTICKS ANYWHERE IN THIS FILE — the GLSL lives inside JS template literals, so
+// one stray backtick in a comment closes the string and the app dies at load with a
+// syntax error pointing at the comment, not at the shader.
+
+export const baseVert = /* glsl */`#version 300 es
+layout(location = 0) in vec2 aPos;
+out vec2 vUv;
+out vec2 vL;
+out vec2 vR;
+out vec2 vT;
+out vec2 vB;
+uniform vec2 uTexel;
+void main() {
+  vUv = aPos * 0.5 + 0.5;
+  vL = vUv - vec2(uTexel.x, 0.0);
+  vR = vUv + vec2(uTexel.x, 0.0);
+  vT = vUv + vec2(0.0, uTexel.y);
+  vB = vUv - vec2(0.0, uTexel.y);
+  gl_Position = vec4(aPos, 0.0, 1.0);
+}`;
+
+const head = /* glsl */`#version 300 es
+precision highp float;
+precision highp sampler2D;
+in vec2 vUv; in vec2 vL; in vec2 vR; in vec2 vT; in vec2 vB;
+out vec4 fragColor;
+
+float h21(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123); }
+float vnoise(vec2 x) {
+  vec2 i = floor(x), f = fract(x);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(h21(i),              h21(i + vec2(1, 0)), u.x),
+             mix(h21(i + vec2(0, 1)), h21(i + vec2(1, 1)), u.x), u.y);
+}
+// Noise that TILES in x with an integer period. The room is a closed pentagon, so the
+// base field must come back to itself at uv.x = 1 or there is a visible seam on the
+// wall-5 → wall-1 join. Octaves double the period exactly (x *= 2.0, not the usual
+// 2.03) so every octave keeps tiling.
+float hashP(vec2 i, float P) {
+  i.x = mod(i.x, P);
+  return fract(sin(dot(i, vec2(127.1, 311.7))) * 43758.5453123);
+}
+float vnoiseP(vec2 x, float P) {
+  vec2 i = floor(x), f = fract(x);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hashP(i, P),              hashP(i + vec2(1, 0), P), u.x),
+             mix(hashP(i + vec2(0, 1), P), hashP(i + vec2(1, 1), P), u.x), u.y);
+}
+float fbmP(vec2 x, float P) {
+  float s = 0.0, a = 0.5, per = P;
+  for (int i = 0; i < 4; i++) { s += a * vnoiseP(x, per); x *= 2.0; per *= 2.0; a *= 0.5; }
+  return s;
+}
+`;
+
+// ---------------------------------------------------------------- wave equation
+
+// ---------------------------------------------------------------- trail field
+
+// ---------------------------------------------------------------- contour render
+
+export const contourFrag = head + /* glsl */`
+uniform sampler2D uWave;
+uniform sampler2D uTrail;
+uniform vec2 uSimTexel;
+uniform float uTime;
+uniform float uAspect;
+uniform float uContours;
+uniform float uMajorEvery;
+uniform float uBaseAmp;
+uniform float uWaveGain;
+uniform float uTrailGain;
+uniform vec3 uCold;
+uniform vec3 uHot;
+uniform float uGlow;
+uniform float uTrailGlow;
+uniform float uRelief;      // slope exaggeration for the shading
+uniform float uAmbient;
+uniform float uShade;
+uniform float uSpec;
+uniform vec3 uDeep;         // hypsometric ramp: valley → mid → crest
+uniform vec3 uMid;
+uniform vec3 uHigh;
+uniform float uSeaLevel;    // height of the waterline in field units
+uniform float uSeaDrift;    // how far it breathes up and down
+uniform float uSeaSpeed;
+uniform vec3 uLand;         // colour of ground that has risen above the water
+uniform float uCoast;       // brightness of the shoreline itself
+uniform float uFoam;        // extra shore brightness where waves are breaking on it
+uniform float uCurrent;     // travelling pulses of light along the shoreline
+uniform float uCurrentSpeed;
+uniform float uLightSpin;
+
+// Four taps on the diagonals of one sim texel. The simulation runs at a fraction of the
+// output size, and a plain bilinear read leaves C0 kinks that contour extraction turns
+// into visible faceting along every line. Averaging four bilinear taps costs almost
+// nothing and hides it completely.
+vec4 smooth4(sampler2D s, vec2 uv) {
+  // ±0.9 texel, not ±0.5. The tighter kernel was enough for the LINES, but the relief
+  // shading takes a DERIVATIVE of this field, and a derivative magnifies exactly the C0
+  // kinks bilinear upsampling leaves behind — they showed up as square glitter tiles
+  // wherever the specular caught them.
+  vec2 h = uSimTexel * 0.9;
+  return 0.25 * (texture(s, uv + vec2( h.x,  h.y)) + texture(s, uv + vec2(-h.x,  h.y))
+               + texture(s, uv + vec2( h.x, -h.y)) + texture(s, uv + vec2(-h.x, -h.y)));
+}
+
+void main() {
+  vec2 p = vec2(vUv.x * uAspect, vUv.y);   // wall-height units: a circle is a circle
+
+  // Resting swell — long crossing waves plus two octaves of drift. Nothing in here
+  // should read as a shape; it exists so the room breathes when it is empty.
+  // Every x frequency is an exact multiple of one lap of the room (TAU/uAspect) and
+  // both noise layers tile on integer periods, so the field is continuous across the
+  // seam. Free-hand constants here WILL show as a vertical scar on the wall.
+  const float TAU = 6.28318530718;
+  float lap = TAU / uAspect;               // one full cycle around all five walls
+  float f = 0.0;
+  f += sin(p.x * lap + uTime * 0.13) * 0.55;
+  f += sin(p.y * 1.35 - uTime * 0.09 + sin(p.x * lap * 2.0) * 1.2) * 0.42;
+  f += (fbmP(vec2(vUv.x * 6.0 + uTime * 0.10, vUv.y * 6.0 / uAspect + uTime * 0.05), 6.0) - 0.5) * 1.35;
+  f += (fbmP(vec2(vUv.x * 18.0 - uTime * 0.30, vUv.y * 18.0 / uAspect), 18.0) - 0.5) * 0.42;
+  f *= uBaseAmp;
+
+  float wave = smooth4(uWave, vUv).r;
+  vec4 trail = smooth4(uTrail, vUv);
+  f += wave * uWaveGain + trail.a * uTrailGain;
+
+  // Contour extraction. fwidth keeps every line one pixel wide however steep the field
+  // gets — without it the crowded rings around a fresh touch turn into grey mush, which
+  // is exactly what makes most iso-line visuals look cheap.
+  float v = f * uContours;
+  float w = fwidth(v);
+  float minor = 1.0 - smoothstep(0.6 * w, 1.5 * w, abs(fract(v) - 0.5));
+
+  float vm = v / uMajorEvery;
+  float wm = fwidth(vm);
+  float major = 1.0 - smoothstep(0.6 * wm, 1.5 * wm, abs(fract(vm) - 0.5));
+
+  // --- relief -------------------------------------------------------------------
+  // Lines alone read as a diagram. Shading the surface BETWEEN them is what turns this
+  // into something with volume: a swipe stops being a set of rings and becomes a ridge
+  // with a lit face and a shadowed one.
+  //
+  // The normal comes from screen-space derivatives of the very same field the contours
+  // are cut from, so the shading and the lines can never disagree — and it costs two
+  // instructions instead of extra taps.
+  vec2 slope = vec2(dFdx(f), dFdy(f)) * uRelief;
+  vec3 nrm = normalize(vec3(-slope.x, -slope.y, 1.0));
+  // The light swings round very slowly (a full turn takes minutes). Nobody watches it
+  // move, but the relief is never lit the same way twice and the room keeps changing
+  // without anything "happening".
+  float la = uTime * uLightSpin;
+  vec3 Ldir = normalize(vec3(cos(la) * 0.62, 0.55 + sin(la) * 0.22, 0.60));
+  float diff = clamp(dot(nrm, Ldir), 0.0, 1.0);
+  float spec = pow(clamp(reflect(-Ldir, nrm).z, 0.0, 1.0), 26.0);
+
+  // Hypsometric ramp — the colour convention of every printed relief map: dark cold in
+  // the hollows, bright cold on the crests. It also means the wall is never flat black
+  // between lines, which is what made the first version feel thin.
+  float h = clamp(f * 0.5 + 0.5, 0.0, 1.0);
+  vec3 ramp = h < 0.5 ? mix(uDeep, uMid, h * 2.0) : mix(uMid, uHigh, (h - 0.5) * 2.0);
+
+  // --- waterline ----------------------------------------------------------------
+  // One iso-line promoted to a COASTLINE, with everything above it treated as dry land.
+  // This is what turns a field of stripes into readable shapes — islands, straits,
+  // lagoons — and it costs one subtraction, because the trail a hand deposits already
+  // raises the surface: a swipe literally lifts new land out of the water, which then
+  // sinks again as the trail decays.
+  //
+  // The level itself breathes, so the coast is never the same shape twice.
+  float sea = uSeaLevel + uSeaDrift * sin(uTime * uSeaSpeed);
+  float above = f - sea;
+  float aw = fwidth(above) * 1.2;
+  float land = smoothstep(-aw, aw, above);
+  float coast = 1.0 - smoothstep(0.0, aw * 3.0, abs(above));
+
+  vec3 surface = mix(ramp, uLand * (0.55 + 0.75 * h), land);
+  vec3 c = surface * (uAmbient + uShade * diff);
+  c += vec3(0.80, 0.93, 1.00) * spec * uSpec * (0.35 + 0.65 * (1.0 - land));
+  // Surf. The shoreline is exactly where a travelling ripple becomes visible as an
+  // event rather than a shape, so brightening the coast by the LOCAL WAVE AMPLITUDE
+  // makes every wave arrive somewhere. A speckle scrolling along the shore keeps it from
+  // reading as a uniform neon outline.
+  float surf = smoothstep(0.01, 0.16, abs(wave));
+  float speck = 0.65 + 0.35 * vnoise(vec2(vUv.x * uAspect * 26.0 - uTime * 0.9, vUv.y * 26.0));
+  c += vec3(0.86, 0.97, 1.00) * coast * (uCoast + uFoam * surf * speck);
+
+  // Pulses of light running along the shore. Getting a true arc-length parameter along a
+  // contour would mean tracing it; a travelling wave in x restricted to the coast band
+  // reads as exactly that, because coastlines here meander horizontally. The frequency is
+  // an integer number of laps so the pulses cross the pentagon seam without a jump.
+  const float TAU2 = 6.28318530718;
+  float lap2 = TAU2 / uAspect;
+  float pulse = sin(p.x * lap2 * 9.0 - uTime * uCurrentSpeed + f * 2.5);
+  pulse = pow(max(pulse, 0.0), 6.0);
+  c += vec3(0.55, 0.85, 1.00) * coast * pulse * uCurrent;
+
+  // --- lines on top -------------------------------------------------------------
+  // A trail marks itself out by COLOUR, at the same brightness as every other line.
+  // The first version drew trail lines about twice as hot as normal ones, which blew the
+  // stroke out to white and buried the water it was supposed to be drawn on.
+  float tp = min(trail.a * 1.6, 1.0);
+  vec3 tint = trail.rgb;
+  vec3 colMinor = mix(uCold, tint, tp);
+  vec3 colMajor = mix(uHot, mix(uHot, tint, 0.7), tp);
+
+  c += colMinor * minor * 0.50;
+  c += colMajor * major * 0.72;
+  c += uHot * minor * major * 0.35;
+  c += colMinor * exp(-abs(fract(v) - 0.5) * 7.0) * uGlow;
+  c += tint * smoothstep(0.08, 0.8, trail.a) * uTrailGlow;
+
+  fragColor = vec4(c, 1.0);
+}`;
+
+// ---------------------------------------------------------------- bloom + composite
+
+export const bloomPrefilterFrag = head + /* glsl */`
+uniform sampler2D uTexture;
+uniform float uThreshold;
+void main() {
+  vec3 c = texture(uTexture, vUv).rgb;
+  float br = max(c.r, max(c.g, c.b));
+  fragColor = vec4(c * clamp(br - uThreshold, 0.0, 1.0) / max(br, 1e-4), 1.0);
+}`;
+
+export const blurFrag = head + /* glsl */`
+uniform sampler2D uTexture;
+uniform vec2 uDir;
+void main() {
+  vec3 c = texture(uTexture, vUv).rgb * 0.2270270270;
+  c += texture(uTexture, vUv + uDir * 1.3846153846).rgb * 0.3162162162;
+  c += texture(uTexture, vUv - uDir * 1.3846153846).rgb * 0.3162162162;
+  c += texture(uTexture, vUv + uDir * 3.2307692308).rgb * 0.0702702703;
+  c += texture(uTexture, vUv - uDir * 3.2307692308).rgb * 0.0702702703;
+  fragColor = vec4(c, 1.0);
+}`;
+
+export const compositeFrag = head + /* glsl */`
+uniform sampler2D uScene;
+uniform sampler2D uBloom;
+uniform float uTime;
+uniform float uExposure;
+uniform float uBloomStrength;
+uniform float uGrain;
+uniform float uVignette;
+uniform float uBg;
+
+vec3 aces(vec3 x) {
+  const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
+  return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+void main() {
+  vec3 c = texture(uScene, vUv).rgb;
+  c += texture(uBloom, vUv).rgb * uBloomStrength;
+  c += uBg * vec3(0.16, 0.34, 0.62);            // never a dead black rectangle
+
+  c = aces(c * uExposure);
+
+  // Vertical falloff ONLY. A horizontal vignette would draw a dark band down every wall
+  // join, and the room is meant to read as one continuous surface.
+  float v = smoothstep(0.0, 0.12, vUv.y) * smoothstep(0.0, 0.10, 1.0 - vUv.y);
+  c *= mix(1.0, v, uVignette);
+
+  // Dither before the 8-bit NDI pack: the dark field bands visibly across a 10 m
+  // projection without it.
+  float g = fract(sin(dot(vUv * vec2(1920.0, 1080.0) + uTime, vec2(12.9898, 78.233))) * 43758.5453);
+  c += (g - 0.5) * uGrain;
+
+  fragColor = vec4(c, 1.0);
+}`;
