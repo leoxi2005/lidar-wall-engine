@@ -1,0 +1,381 @@
+<meta charset="utf-8">
+<title>Vảy kim loại — preview</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;color:#cfd4dc;font:12px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
+  #c{position:fixed;inset:0;width:100%;height:100%;display:block;cursor:crosshair}
+  #ui{position:fixed;left:12px;top:12px;width:236px;background:rgba(8,10,14,.86);border:1px solid #232a36;
+      border-radius:10px;padding:10px 12px;backdrop-filter:blur(8px);max-height:calc(100vh - 24px);overflow:auto}
+  #ui h3{margin:0 0 8px;font-size:11px;letter-spacing:.12em;color:#7f8899;font-weight:600}
+  .row{display:flex;align-items:center;gap:8px;margin:5px 0}
+  .row label{flex:0 0 96px;font-size:11px;color:#9aa4b4}
+  .row input[type=range]{flex:1;height:3px;-webkit-appearance:none;background:#2a3242;border-radius:2px}
+  .row input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;height:11px;border-radius:50%;background:#c8d2e2;cursor:pointer}
+  .row b{flex:0 0 34px;text-align:right;font-size:10px;color:#6b7484;font-weight:400}
+  .pal{display:flex;gap:6px;margin:8px 0 10px}
+  .pal button{flex:1;padding:6px 0;background:#151a24;border:1px solid #2a3242;color:#aeb7c6;border-radius:6px;cursor:pointer;font-size:11px}
+  .pal button.on{background:#243043;border-color:#4b5c78;color:#e6ecf5}
+  #copy{width:100%;margin-top:8px;padding:7px 0;background:#1b2534;border:1px solid #34405a;color:#cfe0ff;border-radius:6px;cursor:pointer}
+  #hud{position:fixed;right:12px;top:12px;font-size:11px;color:#6b7484;text-align:right;background:rgba(8,10,14,.7);
+       padding:6px 10px;border-radius:8px;border:1px solid #1e242f}
+</style>
+<canvas id="c"></canvas>
+<div id="hud">–</div>
+<div id="ui">
+  <h3>VẢY KIM LOẠI</h3>
+  <div class="pal" id="pal"></div>
+  <div id="sliders"></div>
+  <button id="copy">COPY THÔNG SỐ</button>
+</div>
+<script>
+window.onerror = (m,s,l,c,e)=>{ window.__err = (e&&e.stack)||m; console.log('ERR: '+window.__err); };
+const cv = document.getElementById('c');
+const gl = cv.getContext('webgl2', {antialias:false, alpha:false, powerPreference:'high-performance'});
+if (!gl) { document.body.innerHTML = '<p style="padding:20px">Máy không hỗ trợ WebGL2</p>'; throw 0; }
+const HF = gl.getExtension('EXT_color_buffer_float');
+gl.getExtension('OES_texture_float_linear');
+
+/* ---------- tham số chỉnh sống ---------- */
+const P = {
+  tile:   20,    // cạnh mỗi vảy (px)
+  push:   1.35,  // lực tay hất vảy
+  rad:    0.13,  // bán kính ảnh hưởng của tay
+  coup:   0.42,  // độ lan sóng sang vảy bên cạnh
+  stiff:  9.0,   // lò xo kéo vảy về vị trí nghỉ
+  damp:   1.35,  // tắt dần
+  amb:    2.00,  // sóng nền khi không ai chạm
+  jit:    0.30,  // độ lệch ngẫu nhiên của từng vảy
+  gap:    0.07,  // khe hở giữa các vảy
+  corr:   9.0,   // cỡ mảng: bao nhiêu vảy cùng nghiêng một hướng
+  bevel:  0.55,  // vát mép (làm ra viền sáng)
+  sharp:  34,    // độ bóng (đèn gắt/toè)
+  key:    2.60,  // độ mạnh đèn chính
+  bloom:  0.28,  // quầng sáng
+  exp:    1.00,  // độ sáng tổng
+};
+const PALS = [
+  {name:'BẠC',  tint:[0.74,0.78,0.84], lo:[0.004,0.005,0.008], hi:[0.026,0.031,0.042], rim:[0.62,0.76,1.00]},
+  {name:'ĐỒNG', tint:[1.00,0.76,0.36], lo:[0.007,0.004,0.002], hi:[0.036,0.024,0.011], rim:[1.00,0.82,0.50]},
+  {name:'LAM',  tint:[0.56,0.74,0.90], lo:[0.002,0.004,0.010], hi:[0.014,0.028,0.050], rim:[0.45,0.90,1.00]},
+];
+let pal = 0;
+
+/* ---------- helpers ---------- */
+function sh(t, src){ const s=gl.createShader(t); gl.shaderSource(s,src); gl.compileShader(s);
+  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)+'\n'+src); return s; }
+function prog(vs, fs){ const p=gl.createProgram(); gl.attachShader(p,sh(gl.VERTEX_SHADER,vs));
+  gl.attachShader(p,sh(gl.FRAGMENT_SHADER,fs)); gl.linkProgram(p);
+  if(!gl.getProgramParameter(p,gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  p._u={}; const n=gl.getProgramParameter(p,gl.ACTIVE_UNIFORMS);
+  for(let i=0;i<n;i++){ const nm=gl.getActiveUniform(p,i).name.replace(/\[0\]$/,''); p._u[nm]=gl.getUniformLocation(p,nm); }
+  return p; }
+function tex(w,h,filt,fmt,ifmt,type){ const t=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,t);
+  gl.texImage2D(gl.TEXTURE_2D,0,ifmt,w,h,0,fmt,type,null);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,filt); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,filt);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+  return t; }
+function fbo(w,h,filt,float){ const t = float
+    ? tex(w,h,filt,gl.RGBA,gl.RGBA16F,gl.HALF_FLOAT)
+    : tex(w,h,filt,gl.RGBA,gl.RGBA8,gl.UNSIGNED_BYTE);
+  const f=gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER,f);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,t,0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null); return {t,f,w,h}; }
+function dbl(w,h,filt,float){ return {a:fbo(w,h,filt,float), b:fbo(w,h,filt,float), swap(){const x=this.a;this.a=this.b;this.b=x;}}; }
+
+const VS = `#version 300 es
+in vec2 aPos; out vec2 vUv;
+void main(){ vUv = aPos*0.5+0.5; gl_Position = vec4(aPos,0.0,1.0); }`;
+const quad = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+
+function draw(p, target){
+  gl.useProgram(p);
+  if(target){ gl.bindFramebuffer(gl.FRAMEBUFFER,target.f); gl.viewport(0,0,target.w,target.h); }
+  else { gl.bindFramebuffer(gl.FRAMEBUFFER,null); gl.viewport(0,0,cv.width,cv.height); }
+  gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
+  gl.drawArrays(gl.TRIANGLES,0,3);
+}
+function bind(p, name, t, unit){ gl.activeTexture(gl.TEXTURE0+unit); gl.bindTexture(gl.TEXTURE_2D,t); gl.uniform1i(p._u[name],unit); }
+
+/* ---------- 1. mô phỏng: mỗi vảy = 1 con lắc lò xo, nối với 4 vảy bên cạnh ---------- */
+const SIM = prog(VS, `#version 300 es
+precision highp float;
+in vec2 vUv; out vec4 o;
+uniform sampler2D uState;      // RG = độ nghiêng, BA = vận tốc nghiêng
+uniform vec2  uTexel;
+uniform float uDt, uStiff, uDamp, uCoup, uAmb, uTime, uAspect, uPush, uRad;
+uniform vec3  uHand;           // xy vị trí tay, z = đang chạm
+uniform vec2  uHandV;          // vận tốc tay
+void main(){
+  vec4 s = texture(uState, vUv);
+  vec2 t = s.xy, v = s.zw;
+
+  // nối với hàng xóm -> sóng lật TỰ LAN, không cần kịch bản
+  vec2 lap = texture(uState, vUv+vec2(uTexel.x,0.0)).xy
+           + texture(uState, vUv-vec2(uTexel.x,0.0)).xy
+           + texture(uState, vUv+vec2(0.0,uTexel.y)).xy
+           + texture(uState, vUv-vec2(0.0,uTexel.y)).xy - 4.0*t;
+
+  vec2 f = -uStiff*t + uCoup*lap*60.0 - uDamp*v;
+
+  // sóng nền: tường vẫn sống khi phòng trống
+  float w1 = sin((vUv.x*3.0 + vUv.y*1.1)*3.14159 - uTime*0.33);
+  float w2 = sin((vUv.x*1.7 - vUv.y*2.3)*3.14159 + uTime*0.21);
+  f += vec2(w1,w2)*uAmb;
+
+  // tay: hất vảy theo HƯỚNG ĐI của tay -> sóng sáng chạy đuổi theo tay
+  vec2 d = (vUv - uHand.xy)*vec2(uAspect,1.0);
+  float w = exp(-dot(d,d)/(uRad*uRad));
+  f += (uHandV*24.0 + normalize(d+1e-5)*0.9) * uPush * w * uHand.z;
+
+  v += f*uDt;
+  t += v*uDt;
+  t = clamp(t, -0.85, 0.85);
+  o = vec4(t, v);
+}`);
+
+/* ---------- 2. dựng hình: mỗi ô = 1 tấm kim loại có vát mép, phản chiếu môi trường ---------- */
+const REN = prog(VS, `#version 300 es
+precision highp float;
+in vec2 vUv; out vec4 o;
+uniform sampler2D uState;
+uniform vec2  uGrid;
+uniform float uAspect, uGap, uBevel, uJit, uSharp, uKey, uExp, uCorr;
+uniform vec3  uTint, uLo, uHi, uRim;
+
+float h1(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }
+vec2  rot(vec2 p, float a){ float c=cos(a), s=sin(a); return vec2(c*p.x-s*p.y, s*p.x+c*p.y); }
+
+// nhiễu TRƠN: các tấm cạnh nhau nghiêng gần giống nhau -> kết thành mảng lớn.
+// Nếu dùng nhiễu trắng (mỗi tấm một kiểu) thì ra vải kim sa chứ không ra khảm kim loại.
+float vn(vec2 p){
+  vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);
+  return mix(mix(h1(i), h1(i+vec2(1,0)), f.x), mix(h1(i+vec2(0,1)), h1(i+vec2(1,1)), f.x), f.y);
+}
+
+// môi trường giả: phòng TỐI + 3 nguồn sáng nhỏ.
+// Nền phải gần đen, nếu không thì tấm nào cũng sáng và ra tường gạch men chứ không ra kim loại.
+vec3 env(vec3 r){
+  vec3 L1 = normalize(vec3(-0.34, 0.58, 0.74));
+  vec3 L2 = normalize(vec3( 0.76,-0.22, 0.61));
+  vec3 L3 = normalize(vec3( 0.10, 0.92, 0.38));
+  vec3 c  = mix(uLo, uHi, clamp(r.y*0.5+0.5, 0.0, 1.0));
+  c += vec3(pow(max(dot(r,L1),0.0), uSharp      )) * uKey;          // đèn chính, gắt
+  c += uRim * pow(max(dot(r,L2),0.0), uSharp*0.7 ) * uKey * 0.55;   // đèn viền lệch bên
+  c += uRim * pow(max(dot(r,L3),0.0), uSharp*2.2 ) * uKey * 0.30;   // đèn chấm rất gắt -> loé hạt
+  return c;
+}
+
+void main(){
+  float rowOff = h1(vec2(floor(vUv.y*uGrid.y), 3.7));
+  vec2 g  = vec2(vUv.x*uGrid.x + rowOff*0.5, vUv.y*uGrid.y);
+  vec2 id = floor(g);
+  vec2 f  = fract(g) - 0.5;
+
+  float r1 = h1(id), r2 = h1(id+17.3), r3 = h1(id+91.7);
+
+  // mỗi tấm lệch góc + lệch cỡ một chút -> khảm thủ công, không ra caro máy móc
+  float ang = (r1-0.5)*0.38;
+  vec2  q   = rot(f, ang);
+  float hw = 0.5 - uGap*0.5 - r2*0.10;
+
+  float e = max(abs(q.x), abs(q.y));
+  if (e > hw) { o = vec4(uLo*0.12, 1.0); return; }   // khe hở giữa các tấm: gần như đen
+
+  vec2 st = texture(uState, (id+0.5)/uGrid).xy;
+
+  // độ nghiêng nghỉ: mảng lớn trơn + chút nhiễu hạt -> khảm gồ ghề tự nhiên khi đứng yên
+  vec2 g2 = id/uCorr;
+  vec2 rest = (vec2(vn(g2), vn(g2+37.7))-0.5)*uJit*1.30
+            + (vec2(r2,r3)-0.5)*uJit*0.22;
+  vec2 tilt = st + rest;
+
+  vec3 n = normalize(vec3(-tilt, 1.0));
+
+  // vát mép: cạnh tấm hớt sáng -> đó là thứ làm nó ra KIM LOẠI chứ không phải ô màu
+  float bw  = 0.16;
+  float bev = smoothstep(hw-bw, hw, e);
+  vec2  out2 = (abs(q.x) > abs(q.y)) ? vec2(sign(q.x),0.0) : vec2(0.0,sign(q.y));
+  n = normalize(n + vec3(rot(out2,-ang)*bev*uBevel, 0.0));
+
+  vec3 view = normalize(vec3((vUv-0.5)*vec2(uAspect,1.0)*0.9, 1.6));
+  vec3 refl = reflect(-view, n);
+
+  vec3 c = env(refl) * uTint;
+
+  // fresnel: mép nhìn xiên sáng hơn, đúng như kim loại thật
+  c += uTint * pow(1.0 - max(dot(n,view),0.0), 5.0) * 0.06;
+
+  c *= mix(0.40, 1.0, 1.0-bev*0.70);            // chân vát mép tối -> tấm có bề dày
+  c *= mix(0.80, 1.16, r3);                     // mỗi tấm bóng/xỉn khác nhau
+  o = vec4(c*uExp, 1.0);
+}`);
+
+/* ---------- 3. quầng sáng + nén theo độ chói ---------- */
+const BRIGHT = prog(VS, `#version 300 es
+precision highp float; in vec2 vUv; out vec4 o;
+uniform sampler2D uSrc;
+void main(){ vec3 c=texture(uSrc,vUv).rgb; float l=max(c.r,max(c.g,c.b));
+  o = vec4(c*smoothstep(0.55,1.25,l), 1.0); }`);
+const BLUR = prog(VS, `#version 300 es
+precision highp float; in vec2 vUv; out vec4 o;
+uniform sampler2D uSrc; uniform vec2 uDir;
+void main(){ vec3 c = texture(uSrc,vUv).rgb*0.227;
+  c += (texture(uSrc,vUv+uDir*1.385).rgb + texture(uSrc,vUv-uDir*1.385).rgb)*0.316;
+  c += (texture(uSrc,vUv+uDir*3.231).rgb + texture(uSrc,vUv-uDir*3.231).rgb)*0.070;
+  o = vec4(c,1.0); }`);
+const COMP = prog(VS, `#version 300 es
+precision highp float; in vec2 vUv; out vec4 o;
+uniform sampler2D uSrc, uBloom; uniform float uBloomAmt;
+void main(){
+  vec3 c = texture(uSrc,vUv).rgb + texture(uBloom,vUv).rgb*uBloomAmt;
+  // nén theo ĐỘ CHÓI, không nén từng kênh -> lõi sáng giữ màu kim loại, không cháy trắng
+  float L = max(c.r,max(c.g,c.b));
+  c *= (L>1e-4) ? (L/(1.0+L))/L : 0.0;
+  c = pow(c, vec3(1.0/2.2));
+  o = vec4(c,1.0);
+}`);
+
+/* ---------- tài nguyên ---------- */
+let state, scene, bl1, bl2, GW=0, GH=0;
+function alloc(){
+  const W = cv.width, H = cv.height;
+  GW = Math.max(8, Math.round(W / P.tile));
+  GH = Math.max(8, Math.round(H / P.tile));
+  state = dbl(GW, GH, gl.LINEAR, true);
+  // xoá về 0 để không bắt đầu bằng rác bộ nhớ
+  for (const s of [state.a, state.b]) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, s.f); gl.clearColor(0,0,0,0); gl.clear(gl.COLOR_BUFFER_BIT);
+  }
+  scene = fbo(W, H, gl.LINEAR, true);
+  bl1 = fbo(W>>2, H>>2, gl.LINEAR, true);
+  bl2 = fbo(W>>2, H>>2, gl.LINEAR, true);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+function resize(){
+  const d = Math.min(devicePixelRatio||1, 2);
+  cv.width  = Math.round(innerWidth*d);
+  cv.height = Math.round(innerHeight*d);
+  alloc();
+}
+addEventListener('resize', resize);
+
+/* ---------- tay ---------- */
+const hand = {x:.5, y:.5, px:.5, py:.5, vx:0, vy:0, on:0, auto:true, t:0};
+cv.addEventListener('pointermove', e=>{
+  hand.x = e.clientX/innerWidth; hand.y = 1 - e.clientY/innerHeight;
+  hand.auto = false; hand.idle = 0;
+});
+cv.addEventListener('pointerdown', ()=>{ hand.down = 1; });
+addEventListener('pointerup', ()=>{ hand.down = 0; });
+
+/* ---------- vòng lặp ---------- */
+let last = performance.now(), tAcc = 0, frames = 0, fpsT = 0, fps = 0;
+function frame(now){
+  const dtReal = Math.min((now-last)/1000, 0.05); last = now; tAcc += dtReal;
+
+  // tay tự chạy khi không ai rê chuột -> luôn thấy được hiệu ứng
+  hand.idle = (hand.idle||0) + dtReal;
+  if (hand.auto || hand.idle > 2.5) {
+    hand.t += dtReal;
+    hand.x = 0.5 + 0.36*Math.sin(hand.t*0.55) * Math.cos(hand.t*0.17);
+    hand.y = 0.5 + 0.24*Math.sin(hand.t*0.83 + 1.1);
+  }
+  // vận tốc tay theo THỜI GIAN THẬT (không đóng cứng 1/60) rồi lọc mạnh cho khỏi giật
+  const k = 1 - Math.exp(-dtReal*14);
+  hand.vx += ((hand.x-hand.px)/Math.max(dtReal,1e-3) - hand.vx)*k;
+  hand.vy += ((hand.y-hand.py)/Math.max(dtReal,1e-3) - hand.vy)*k;
+  hand.px = hand.x; hand.py = hand.y;
+
+  const aspect = cv.width/cv.height;
+
+  // 2 bước nhỏ: lò xo cứng cần bước nhỏ mới ổn định, KHÔNG được tăng dt
+  const sub = 2, dt = Math.min(dtReal, 1/60)/sub;
+  for (let i=0;i<sub;i++){
+    gl.useProgram(SIM);
+    bind(SIM,'uState', state.a.t, 0);
+    gl.uniform2f(SIM._u.uTexel, 1/GW, 1/GH);
+    gl.uniform1f(SIM._u.uDt, dt);
+    gl.uniform1f(SIM._u.uStiff, P.stiff);
+    gl.uniform1f(SIM._u.uDamp,  P.damp);
+    gl.uniform1f(SIM._u.uCoup,  P.coup);
+    gl.uniform1f(SIM._u.uAmb,   P.amb);
+    gl.uniform1f(SIM._u.uTime,  tAcc);
+    gl.uniform1f(SIM._u.uAspect, aspect);
+    gl.uniform1f(SIM._u.uPush,  P.push);
+    gl.uniform1f(SIM._u.uRad,   P.rad);
+    gl.uniform3f(SIM._u.uHand,  hand.x, hand.y, 1);
+    gl.uniform2f(SIM._u.uHandV, hand.vx, hand.vy);
+    draw(SIM, state.b); state.swap();
+  }
+
+  const pl = PALS[pal];
+  gl.useProgram(REN);
+  bind(REN,'uState', state.a.t, 0);
+  gl.uniform2f(REN._u.uGrid, GW, GH);
+  gl.uniform1f(REN._u.uAspect, aspect);
+  gl.uniform1f(REN._u.uGap, P.gap);
+  gl.uniform1f(REN._u.uBevel, P.bevel);
+  gl.uniform1f(REN._u.uJit, P.jit);
+  gl.uniform1f(REN._u.uCorr, P.corr);
+  gl.uniform1f(REN._u.uSharp, P.sharp);
+  gl.uniform1f(REN._u.uKey, P.key);
+  gl.uniform1f(REN._u.uExp, P.exp);
+  gl.uniform3fv(REN._u.uTint, pl.tint);
+  gl.uniform3fv(REN._u.uLo, pl.lo);
+  gl.uniform3fv(REN._u.uHi, pl.hi);
+  gl.uniform3fv(REN._u.uRim, pl.rim);
+  draw(REN, scene);
+
+  gl.useProgram(BRIGHT); bind(BRIGHT,'uSrc', scene.t, 0); draw(BRIGHT, bl1);
+  gl.useProgram(BLUR); bind(BLUR,'uSrc', bl1.t, 0); gl.uniform2f(BLUR._u.uDir, 1/bl1.w, 0); draw(BLUR, bl2);
+  gl.useProgram(BLUR); bind(BLUR,'uSrc', bl2.t, 0); gl.uniform2f(BLUR._u.uDir, 0, 1/bl1.h); draw(BLUR, bl1);
+
+  gl.useProgram(COMP);
+  bind(COMP,'uSrc', scene.t, 0); bind(COMP,'uBloom', bl1.t, 1);
+  gl.uniform1f(COMP._u.uBloomAmt, P.bloom);
+  draw(COMP, null);
+
+  frames++; if (now - fpsT > 500){ fps = Math.round(frames*1000/(now-fpsT)); frames=0; fpsT=now;
+    document.getElementById('hud').textContent = fps+' fps · '+GW+'×'+GH+' vảy'; }
+  requestAnimationFrame(frame);
+}
+
+/* ---------- UI ---------- */
+const SL = [
+  ['tile','cỡ vảy',6,40,1,true],
+  ['push','lực tay',0,4,.01],
+  ['rad','vùng ảnh hưởng',.03,.3,.005],
+  ['coup','lan sóng',0,1.2,.01],
+  ['stiff','độ đàn hồi',1,30,.1],
+  ['damp','tắt dần',.2,6,.05],
+  ['amb','sóng nền',0,5,.02],
+  ['jit','lệch ngẫu nhiên',0,1.2,.01],
+  ['corr','cỡ mảng',1.5,30,.5],
+  ['gap','khe hở',0,.4,.005],
+  ['bevel','vát mép',0,1.5,.01],
+  ['sharp','độ bóng',6,140,1],
+  ['key','đèn chính',0,3,.01],
+  ['bloom','quầng sáng',0,2,.01],
+  ['exp','độ sáng',.3,3,.01],
+];
+const box = document.getElementById('sliders');
+for (const [k,label,mn,mx,st,realloc] of SL){
+  const d = document.createElement('div'); d.className='row';
+  d.innerHTML = '<label>'+label+'</label><input type="range" min="'+mn+'" max="'+mx+'" step="'+st+'" value="'+P[k]+'"><b>'+P[k]+'</b>';
+  const inp = d.querySelector('input'), out = d.querySelector('b');
+  inp.oninput = ()=>{ P[k] = parseFloat(inp.value); out.textContent = inp.value; if (realloc) alloc(); };
+  box.appendChild(d);
+}
+const pbox = document.getElementById('pal');
+PALS.forEach((p,i)=>{ const b=document.createElement('button'); b.textContent=p.name; b.className = i===pal?'on':'';
+  b.onclick = ()=>{ pal=i; [...pbox.children].forEach((c,j)=>c.className = j===i?'on':''); }; pbox.appendChild(b); });
+document.getElementById('copy').onclick = ()=>{
+  navigator.clipboard.writeText(JSON.stringify({palette:PALS[pal].name, ...P}, null, 2));
+  const b=document.getElementById('copy'); b.textContent='ĐÃ COPY'; setTimeout(()=>b.textContent='COPY THÔNG SỐ',1200);
+};
+
+resize();
+requestAnimationFrame(t=>{ last=t; fpsT=t; frame(t); });
+</script>
