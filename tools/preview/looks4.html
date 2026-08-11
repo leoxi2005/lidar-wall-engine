@@ -18,6 +18,12 @@
   button.on { background:#1d2942; border-color:#5b83c8; color:#eaf3ff; }
   .desc { color:#7e8ea6; margin:12px 0 0; max-width:80ch; }
   .desc b { color:#a9c4e2; font-weight:600; }
+  #ctl { display:grid; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:6px 14px;
+         margin:12px 0 0; padding:10px 12px; background:#0d1119; border:1px solid #1c2436; border-radius:6px; }
+  #ctl label { display:flex; align-items:center; gap:8px; font-size:11px; color:#7f92ab; }
+  #ctl label span { width:96px; flex:none; }
+  #ctl input { flex:1; accent-color:#5b83c8; }
+  #ctl b { color:#cfe0f2; width:46px; text-align:right; font-weight:500; }
 </style>
 </head>
 <body>
@@ -36,6 +42,7 @@
   </div>
 
   <canvas id="c"></canvas>
+  <div id="ctl"></div>
   <p class="desc" id="desc"></p>
 </div>
 
@@ -110,18 +117,29 @@ const handX = new Float32Array(8), handY = new Float32Array(8);
 const handVX = new Float32Array(8), handVY = new Float32Array(8);
 let handN = 0;
 function setHands(hands) {
-  handN = Math.min(hands.length, 8);
-  for (let i = 0; i < handN; i++) {
+  handN = 0;
+  for (let i = 0; i < hands.length && handN < 8; i++) {
     const h = hands[i];
-    handX[i] = h.x * ASPECT; handY[i] = h.y;
-    handVX[i] = (h.vx || 0) * ASPECT; handVY[i] = h.vy || 0;
+    const px0 = (h.px0 != null ? h.px0 : h.x), py0 = (h.py0 != null ? h.py0 : h.y);
+    let dx = h.x - px0; dx -= Math.round(dx);
+    const dist = Math.hypot(dx * ASPECT, h.y - py0);
+    // Split the hand into a few sample points along the path it covered this frame, so a
+    // quick swipe drags a continuous stroke of water instead of a dotted one.
+    const steps = Math.min(4, Math.max(1, Math.ceil(dist / (HAND_R * 0.6))));
+    for (let k = 0; k < steps && handN < 8; k++) {
+      const f = steps === 1 ? 1 : k / (steps - 1);
+      handX[handN] = ((px0 + dx * f + 1) % 1) * ASPECT;
+      handY[handN] = py0 + (h.y - py0) * f;
+      handVX[handN] = (h.vx || 0) * ASPECT; handVY[handN] = h.vy || 0;
+      handN++;
+    }
   }
 }
 function flow(px, py, t) {
   const e = 0.05;
   let vx = (psi(px, py + e, t) - psi(px, py - e, t)) / (2 * e);
   let vy = -(psi(px + e, py, t) - psi(px - e, py, t)) / (2 * e);
-  vx *= 0.165; vy *= 0.165;
+  vx *= 0.165 * CFG.flow; vy *= 0.165 * CFG.flow;
   for (const o of vorts) {
     let dx = px - o.x;
     dx -= Math.round(dx / ASPECT) * ASPECT;
@@ -134,7 +152,7 @@ function flow(px, py, t) {
     // spins the centre into chaos and packs every particle into one blown-out white dot —
     // real vortices have an open, quiet eye, and so does the reference.
     const rn = r / o.r;
-    const w = o.s * k * rn * Math.exp(1 - rn * rn) * 0.65;
+    const w = o.s * k * rn * Math.exp(1 - rn * rn) * 0.65 * CFG.vort;
     // PURE rotation, no outward term. Any radial component makes the flow divergent, and
     // a divergent flow sweeps particles out of some regions and piles them into others —
     // which is what left half the wall empty.
@@ -151,16 +169,17 @@ function flow(px, py, t) {
     dx -= Math.round(dx / ASPECT) * ASPECT;
     const dy = py - handY[i];
     const r2 = dx * dx + dy * dy;
-    const g = Math.exp(-r2 / (HAND_R * HAND_R));
+    const R = HAND_R * CFG.reach;
+    const g = Math.exp(-r2 / (R * R));
     if (g < 0.004) continue;
     const r = Math.sqrt(r2) + 1e-4;
     const speed = Math.hypot(handVX[i], handVY[i]);
-    vx += handVX[i] * g * HAND_DRAG;
-    vy += handVY[i] * g * HAND_DRAG;
+    vx += handVX[i] * g * HAND_DRAG * CFG.drag;
+    vy += handVY[i] * g * HAND_DRAG * CFG.drag;
     // Curl around the hand, signed by which side of its path you are on, so the water
     // rolls up into a swirl that travels WITH it.
     const side = (dx * handVY[i] - dy * handVX[i]) > 0 ? 1 : -1;
-    const curl = HAND_CURL * g * (0.25 + Math.min(speed * 2.2, 1.4)) * side;
+    const curl = HAND_CURL * CFG.curl * g * (0.25 + Math.min(speed * 2.2, 1.4)) * side;
     vx += (-dy / r) * curl;
     vy += ( dx / r) * curl;
   }
@@ -328,7 +347,7 @@ const tintR = new Float32Array(8), tintG = new Float32Array(8), tintB = new Floa
 let tintN = 0;
 
 function stepParticles(dt, t, P, hands) {
-  const n = P.n;
+  const n = Math.round(P.n * CFG.count);
   let w = 0;
   tintN = Math.min(hands.length, 8);
   for (let k = 0; k < tintN; k++) {
@@ -352,7 +371,7 @@ function stepParticles(dt, t, P, hands) {
     const sp = Math.hypot(v.x, v.y);
     // Fade in and out over the life so strands appear and vanish without popping.
     const age = Math.min(1, pl[i] * 1.1) * Math.min(1, (pmax[i] - pl[i]) * 0.45);
-    const b = P.gain * pv[i] * age * (0.95 + Math.min(sp * 0.8, 0.5));
+    const b = P.gain * CFG.gain * pv[i] * age * (0.95 + Math.min(sp * 0.8, 0.5));
 
     // COLOUR. Two things stop a big blue wall going monotone: slow-moving water sits
     // deeper and colder, fast water runs towards white; and a very slow tint drifts across
@@ -380,7 +399,7 @@ function stepParticles(dt, t, P, hands) {
     }
 
     let dx = x - x0; dx -= Math.round(dx);       // do not draw across the seam
-    emitQuad(verts, w * 36, x0, y0, x0 + dx, y, P.width, b*cr, b*cg, b*cb);
+    emitQuad(verts, w * 36, x0, y0, x0 + dx, y, P.width * CFG.width, b*cr, b*cg, b*cb);
     w++;
   }
   return w;
@@ -434,11 +453,11 @@ function stepSparks(dt, t) {
 
     const b = 0.42 * Math.min(1, life * 14) * Math.pow(1 - life, 1.6);
     let dx = x - x0; dx -= Math.round(dx);
-    emitQuad(sverts, w * 36, x0, y0, x0 + dx, y, 0.0035, b*sr[i], b*sg[i], b*sb[i]);
+    emitQuad(sverts, w * 36, x0, y0, x0 + dx, y, 0.0035 * CFG.sparkSize, b*sr[i], b*sg[i], b*sb[i]);
     // The head: bright, round, and biggest when the spark is young.
     const hb = b * 0.55, o2 = w * 6;
     spts[o2]   = x; spts[o2+1] = y;
-    spts[o2+2] = (0.0035 + 0.006 * (1 - life)) * accum.h;
+    spts[o2+2] = (0.0035 + 0.006 * (1 - life)) * accum.h * CFG.sparkSize;
     spts[o2+3] = hb*sr[i]; spts[o2+4] = hb*sg[i]; spts[o2+5] = hb*sb[i];
     w++;
   }
@@ -491,8 +510,11 @@ function stir(h, x, y, dt) {
   const d = Math.hypot(dx * ASPECT, y - h.y);
   // Velocity of the hand itself, smoothed — this is what the water is dragged by.
   const ivx = dx * ASPECT / Math.max(dt, 1e-3), ivy = (y - h.y) / Math.max(dt, 1e-3);
-  h.vx = (h.vx || 0) * 0.6 + ivx * 0.4;
-  h.vy = (h.vy || 0) * 0.6 + ivy * 0.4;
+  // Heavier smoothing than feels necessary: this number drives a force on the whole
+  // medium, so a single jumpy sample is visible as a jolt across the wall.
+  const k = 1 - Math.exp(-dt / 0.10);
+  h.vx = (h.vx || 0) + (ivx - (h.vx || 0)) * k;
+  h.vy = (h.vy || 0) + (ivy - (h.vy || 0)) * k;
   h.run += d;
   // Dragging through a fluid sheds a STREET of vortices spinning alternately — that is
   // what makes a swipe stir rather than smear.
@@ -504,7 +526,7 @@ function stir(h, x, y, dt) {
   // swipe throws a shower.
   if (d > 1e-4) {
     h.sparkRun = (h.sparkRun || 0) + d;
-    if (h.sparkRun > 0.014) {
+    if (CFG.sparkRate > 0 && h.sparkRun > 0.014 / CFG.sparkRate) {
       h.sparkRun = 0;
       spawnSparks(x, y, PAL[h.id % PAL.length], 5 + ((Math.min(d, 0.06) * 110) | 0), 0.16 + Math.min(d * 8, 0.38), h.vx || 0, h.vy || 0);
     }
@@ -516,7 +538,15 @@ canvas.addEventListener('pointerdown', e => { const p = toPano(e);
   addVortex(p.x, p.y, (Math.random()<0.5?-1:1)*0.20, 0.30, 8);
   spawnSparks(p.x, p.y, PAL[mouse.id % PAL.length], 160, 0.5);
   try { canvas.setPointerCapture(e.pointerId); } catch(_) {} });
-canvas.addEventListener('pointermove', e => { if (!mouse) return; const p = toPano(e); stir(mouse, p.x, p.y, 1/60); });
+let mouseLast = 0;
+canvas.addEventListener('pointermove', e => {
+  if (!mouse) return;
+  const now = performance.now();
+  const dtp = Math.min(0.1, Math.max(0.004, (now - (mouseLast || now - 16)) / 1000));
+  mouseLast = now;
+  const p = toPano(e);
+  stir(mouse, p.x, p.y, dtp);
+});
 window.addEventListener('pointerup', () => { mouse = null; });
 
 document.querySelectorAll('[data-look]').forEach(b => b.addEventListener('click', () => {
@@ -531,6 +561,42 @@ document.getElementById('clearBtn').addEventListener('click', () => { vorts=[];
   gl.bindFramebuffer(gl.FRAMEBUFFER, accum.f); gl.clearColor(0,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null); });
 document.getElementById('desc').innerHTML = DESCS[0];
+
+// ---------------------------------------------------------------- live controls
+// Twelve rounds of me guessing at "prettier" is twelve rounds too many: the person who
+// can see what is wrong should be holding the knobs. Everything below is live — no
+// reload — and COPY prints the exact numbers to paste into the room config.
+const CFG = {
+  flow: 1.0, vort: 1.0,
+  life: 1.0, width: 1.0, count: 1.0, gain: 1.0, glow: 1.0,
+  drag: 1.0, curl: 1.0, reach: 1.0,
+  sparkRate: 1.0, sparkSize: 1.0
+};
+const SLIDERS = [
+  ['flow','tốc độ dòng',0.2,2.5], ['vort','độ xoáy',0,2.5],
+  ['life','độ dài sợi',0.3,2.5], ['width','bề rộng sợi',0.3,3],
+  ['count','mật độ sợi',0.2,1.6], ['gain','độ sáng sợi',0.2,3],
+  ['glow','quầng sáng',0,3],
+  ['drag','lực kéo của tay',0,3], ['curl','độ cuộn quanh tay',0,3], ['reach','tầm với của tay',0.3,3],
+  ['sparkRate','lượng hạt',0,3], ['sparkSize','cỡ hạt',0.3,3]
+];
+const ctl = document.getElementById('ctl');
+for (const [k,label,lo,hi] of SLIDERS) {
+  const el = document.createElement('label');
+  el.innerHTML = `<span>${label}</span><input type=range min=${lo} max=${hi} step=0.01 value=${CFG[k]}><b>${CFG[k].toFixed(2)}</b>`;
+  const inp = el.querySelector('input'), out = el.querySelector('b');
+  inp.addEventListener('input', () => { CFG[k] = +inp.value; out.textContent = CFG[k].toFixed(2); });
+  ctl.appendChild(el);
+}
+const copyBtn = document.createElement('button');
+copyBtn.textContent = 'COPY số đang chỉnh';
+copyBtn.style.gridColumn = '1 / -1';
+copyBtn.addEventListener('click', () => {
+  const txt = JSON.stringify(CFG, null, 2);
+  navigator.clipboard?.writeText(txt);
+  copyBtn.textContent = 'đã copy — dán cho kỹ thuật: ' + JSON.stringify(CFG);
+});
+ctl.appendChild(copyBtn);
 
 function resize(){ const w=canvas.clientWidth, view=viewFull?ASPECT:WALL;
   const h=Math.round(w/view); canvas.style.height=h+'px';
@@ -550,7 +616,8 @@ function frame() {
   for (const h of demo) {
     const x=(h.cx+h.ax*Math.sin(t*h.sx+h.ph)+1)%1, y=h.cy+h.ay*Math.sin(t*h.sy+h.ph*1.7);
     if (h.first) { h.x=x; h.y=y; h.first=false; }
-    stir(h, x, y, dt); hands.push({x, y, id:h.id, vx:h.vx, vy:h.vy});
+    const px0 = h.x, py0 = h.y;
+    stir(h, x, y, dt); hands.push({x, y, id:h.id, vx:h.vx, vy:h.vy, px0, py0});
   }
   if (mouse) hands.push({x:mouse.x, y:mouse.y, id:mouse.id, vx:mouse.vx, vy:mouse.vy});
 
@@ -570,7 +637,7 @@ function frame() {
   gl.bindFramebuffer(gl.FRAMEBUFFER, accum.f);
   gl.viewport(0, 0, accum.w, accum.h);
   gl.useProgram(fadeProg);
-  gl.uniform1f(U(fadeProg,'uF'), Math.pow(P.fade, dt*60));
+  gl.uniform1f(U(fadeProg,'uF'), Math.pow(1 - (1 - P.fade) / CFG.life, dt*60));
   gl.bindVertexArray(quadVao);
   gl.enable(gl.BLEND); gl.blendFunc(gl.ZERO, gl.SRC_COLOR);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -631,7 +698,7 @@ function frame() {
   gl.uniform2f(U(dispProg,'uView'), s.w, s.x);
   gl.uniform2f(U(dispProg,'uTexel'), 1/accum.w, 1/accum.h);
   gl.uniform1f(U(dispProg,'uExp'), P.exp);
-  gl.uniform1f(U(dispProg,'uGlow'), P.glow);
+  gl.uniform1f(U(dispProg,'uGlow'), P.glow * CFG.glow);
   gl.uniform1f(U(dispProg,'uT'), t);
   gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, accum.t);
   gl.uniform1i(U(dispProg,'uAcc'), 0);
