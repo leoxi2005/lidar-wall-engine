@@ -1,6 +1,6 @@
 {
   "name": "lidar-wall-engine",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Khung dựng tác phẩm tương tác chạm-tường: Hokuyo LiDAR → LiDAR Bridge → OSC → visual → nhiều luồng NDI. Hiệu chỉnh 4 điểm, giữ fps tự động.",
   "main": "engine/main.js",
   "author": "LEOXI",

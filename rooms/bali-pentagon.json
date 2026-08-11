@@ -1,6 +1,6 @@
 {
   "name": "bali-pentagon",
-  "visual": "waves",
+  "visual": "scales",
   "room": {
     "height": 1080,
     "wrap": true,

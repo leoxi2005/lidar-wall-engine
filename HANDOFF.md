@@ -113,17 +113,32 @@ sau mỗi 5 giây chia 5 → số hình NDI **thật sự** tới MadMapper mỗ
 Env: `NDI_OFF` `NDI_IPC` `NDI_PBO` `NDI_RGBA` `RENDER_SCALE` `KIOSK` `SNAP_DIR`/`SNAP_AT` `ROOM`
 `VISUAL` `DEMO` `CALIB`.
 
+## 6b. Mang một visual từ trang preview sang engine
+
+Trang `tools/preview/*.html` chạy trên khung ~2.4:1, engine chạy trên toàn cảnh **9.58:1**. Bốn
+thứ đổi nghĩa khi sang, và cả bốn đều im lặng — không lỗi, chỉ là nhìn khác:
+
+1. **Bước sóng bị kéo dài.** Giữ nguyên số chu kỳ trên toàn cảnh rộng gấp 4 thì các dải sáng nằm
+   cách nhau gấp đôi, cả tường đọc ra tối và phẳng. Quy đổi theo **chiều-cao-tường**, rồi làm tròn
+   về số nguyên chu kỳ.
+2. **Số chu kỳ theo x phải NGUYÊN**, băm theo ô phải `mod` bề ngang, nhiễu trơn phải có chu kỳ chia
+   hết bề ngang. Thiếu bất kỳ cái nào thì chỗ nối giữa mặt tường cuối và mặt tường đầu hiện thành
+   một vệt dọc — chỉ thấy khi phòng khép kín, không thấy trên trang preview.
+3. **Vận tốc tay đổi đơn vị.** Preview tính theo uv nên cú quẹt ngang đã tự bị chia cho tỉ lệ khung;
+   engine trả về uv/giây rồi visual quy sang chiều-cao-tường (đều theo mọi hướng). Bê nguyên hệ số
+   thì cú quẹt ngang mạnh gấp 2.4 lần so với bản đã duyệt.
+4. **Cỡ hạt/ô phải tính theo bề rộng ĐẦY ĐỦ của phòng**, không theo cỡ khung đang render. Tính theo
+   khung render thì lúc engine hạ độ phân giải để giữ fps, tác phẩm đổi luôn giữa buổi diễn.
+
 ## 7. Còn nợ
 
-1. Chưa đóng gói (`npm run build:mac`, CI Windows). Chép `.github/workflows/release.yml` của
-   `wall-touch` sang — **giữ nguyên 3 cái ghim**: runner `windows-2022` (windows-latest dùng VS2026
-   mà `node-gyp 9.4.1` của grandiose không nhận), **Python 3.11** (3.12 làm crash gyp), upload bằng
-   `softprops/action-gh-release`. `grandiose` **không cross-build được từ Mac**.
-2. `node_modules` đang symlink sang `~/wall-touch`. Máy mới thì `npm install`; nếu binary Electron
+1. `node_modules` đang symlink sang `~/wall-touch`. Máy mới thì `npm install`; nếu binary Electron
    giải nén hỏng (thiếu `Frameworks`) thì chép `node_modules/electron/dist` + `path.txt` từ một cài
-   đặt đang chạy được.
-3. Chưa có visual thứ hai. `visuals/waves/` vừa là bản mẫu vừa là bài kiểm tra API.
-4. `room.js` mới lo **tường đứng**. Sàn/trần (đa giác, chiếu từ trên) sẽ cần một loại mặt khác.
+   đặt đang chạy được. **`package-lock.json` phải sinh khi KHÔNG có symlink đó** — nếu không, đường
+   dẫn trong lock trỏ ra `../wall-touch/node_modules` và `npm ci` trên CI cài trượt.
+2. `room.js` mới lo **tường đứng**. Sàn/trần (đa giác, chiếu từ trên) sẽ cần một loại mặt khác.
+3. Hiệu chỉnh của app này lưu riêng (`~/…/lidar-wall-engine/room-<phòng>.json`), không dùng chung
+   với app `wall-touch` — máy show phải bấm `k` hiệu chỉnh lại một lần.
 
 ## 8. Quy tắc tiết kiệm credit
 
