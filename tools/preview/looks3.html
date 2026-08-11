@@ -65,7 +65,7 @@ void main(){ vUv=a*0.5+0.5; gl_Position=vec4(a,0.,1.); }`;
 // gives far cleaner spirals than an advected grid at this resolution.
 const FIELD = `
 uniform float uT, uA;
-uniform vec4 uVort[24];      // xy = centre (wall-heights), z = strength (signed), w = radius
+uniform vec4 uVort[28];      // xy = centre (wall-heights), z = strength (signed), w = radius
 uniform int  uNV;
 
 float h21(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453123); }
@@ -84,8 +84,8 @@ vec2 flow(vec2 p){
   float e = 0.045;
   vec2 v = vec2(psi(p+vec2(0.0,e)) - psi(p-vec2(0.0,e)),
                -(psi(p+vec2(e,0.0)) - psi(p-vec2(e,0.0)))) / (2.0*e);
-  v *= 0.30;
-  for (int i=0;i<24;i++){
+  v *= 0.20;
+  for (int i=0;i<28;i++){
     if (i>=uNV) break;
     vec2 d = p - uVort[i].xy;
     d.x -= round(d.x/uA)*uA;                  // the room wraps
@@ -174,33 +174,39 @@ const LOOKS = [
 DISP_HEAD + `
 void main(){
   vec2 uv = pano();
-  vec4 s = texture(uStreak, uv);
-  float a = s.r;
+  vec2 p = vec2(uv.x*uA, uv.y);
+  float a = texture(uStreak, uv).r;
 
-  // Shade the strands by the slope of the streak field: hairs get a lit side and a dark
-  // side, which is what turns a flat mask into something that looks combed and wet.
-  vec2 g = vec2(dFdx(a), dFdy(a)) * 90.0;
+  // Emboss. Each bristle gets a lit side and a shadowed side, which is what makes the
+  // surface look raised and slightly wet instead of like a flat mask.
+  vec2 g = vec2(dFdx(a), dFdy(a)) * 150.0;
   vec3 n = normalize(vec3(-g.x, -g.y, 1.0));
-  float lit = clamp(dot(n, normalize(vec3(-0.35,0.72,0.60))), 0.0, 1.0);
+  vec3 L = normalize(vec3(-0.38, 0.70, 0.60));
+  float lit = dot(n, L);
+  float up = max(lit, 0.0);
+  float dn = max(-lit, 0.0);
 
-  float hair = smoothstep(0.10, 0.75, a);
-  float fine = smoothstep(0.45, 1.10, a);
+  // Large slow patches of density, so the room has genuinely dark water between the
+  // swirls rather than an even carpet of hair.
+  float dens = 0.30 + 0.90 * fbm(p*0.30 + vec2(uT*0.012, uT*0.006));
+  float hair = smoothstep(0.06, 0.48, a) * dens;
 
-  vec3 deep = vec3(0.020,0.032,0.075);
-  vec3 mid  = vec3(0.10,0.20,0.42);
-  vec3 top  = vec3(0.72,0.83,1.00);
+  vec3 dark = vec3(0.006,0.009,0.018);
+  vec3 body = vec3(0.085,0.125,0.215);
+  vec3 tip  = vec3(0.62,0.72,0.92);
 
-  vec3 c = deep;
-  c += mid * hair * (0.35 + 0.9*lit);
-  c += top * fine * (0.25 + 0.75*lit) * 0.85;
-  c += mid * a * 0.10;
+  vec3 c = dark;
+  c += body * hair * (0.18 + 1.10*up) * 0.62;
+  c += tip  * pow(hair, 2.4) * up * 0.42;
+  c -= body * hair * dn * 0.30;                   // the shadowed side of each bristle
+  c += body * a * 0.045;
 
   for(int i=0;i<8;i++){ if(i>=uN) break;
     vec2 d=vec2(uv.x-uHands[i].x, uv.y-uHands[i].y); d.x-=round(d.x); d.x*=uA;
-    c += uHandCols[i]*exp(-dot(d,d)*70.0)*0.16; }
+    c += uHandCols[i]*exp(-dot(d,d)*60.0)*0.10; }
 
   float v=smoothstep(0.0,0.10,vUv.y)*smoothstep(0.0,0.09,1.0-vUv.y);
-  o=vec4(pow(clamp(c*mix(1.0,v,0.30),0.0,1.0),vec3(0.92)),1.0);
+  o=vec4(pow(clamp(c*mix(1.0,v,0.30),0.0,1.0),vec3(0.96)),1.0);
 }`,
 
 // ---- 2. SMOKE ---------------------------------------------------------------------
@@ -215,11 +221,13 @@ void main(){
   float lit = clamp(dot(n, normalize(vec3(-0.5,0.6,0.62))),0.0,1.0);
   float rim = pow(clamp(1.0-n.z,0.0,1.0), 2.0);
 
-  float body = smoothstep(0.05, 0.85, a);
-  vec3 c = vec3(0.014,0.020,0.036);
-  c += vec3(0.16,0.26,0.48) * body * (0.30 + 1.05*lit);
-  c += vec3(0.85,0.90,1.00) * rim * body * 0.55;
-  c += vec3(0.35,0.50,0.85) * pow(body,3.0) * 0.5;
+  float dens = 0.30 + 0.90*fbm(vec2(uv.x*uA,uv.y)*0.26 + uT*0.010);
+  float body = smoothstep(0.05, 0.42, a) * dens;
+  vec3 c = vec3(0.008,0.012,0.022);
+  c += vec3(0.10,0.16,0.30) * body * (0.18 + 1.10*max(lit,0.0)) * 0.42;
+  c -= vec3(0.10,0.16,0.30) * body * max(-lit,0.0) * 0.5;
+  c += vec3(0.60,0.70,0.92) * rim * body * 0.16;
+  c += vec3(0.22,0.34,0.60) * pow(body,3.0) * 0.18;
 
   for(int i=0;i<8;i++){ if(i>=uN) break;
     vec2 d=vec2(uv.x-uHands[i].x, uv.y-uHands[i].y); d.x-=round(d.x); d.x*=uA;
@@ -240,16 +248,17 @@ void main(){
 
   // Only the brightest tips of the strands survive, so the flow reads as a swarm of
   // points riding it rather than as combed hair.
-  float grain = smoothstep(0.55, 1.35, a);
-  float glow  = smoothstep(0.05, 0.60, a);
+  float grain = smoothstep(0.22, 0.75, a);
+  float glow  = smoothstep(0.02, 0.30, a);
 
   vec3 base = vec3(0.004,0.008,0.018);
   vec3 col  = vec3(0.55,0.78,1.00);
 
+  float dens = 0.25 + 0.95*fbm(vec2(uv.x*uA,uv.y)*0.30 + uT*0.011);
   vec3 c = base;
-  c += col * glow * 0.10;
-  c += col * grain * 1.5;
-  c += vec3(1.0) * pow(grain, 3.0) * 0.7;
+  c += col * glow * 0.030 * dens;
+  c += col * grain * 0.20 * dens;
+  c += vec3(1.0) * pow(grain, 3.0) * 0.11 * dens;
 
   for(int i=0;i<8;i++){ if(i>=uN) break;
     vec2 d=vec2(uv.x-uHands[i].x, uv.y-uHands[i].y); d.x-=round(d.x); d.x*=uA;
@@ -265,16 +274,18 @@ void main(){
 const progs = LOOKS.map(prog);
 
 const PARAMS = [
-  { step: 0.55, fade: 0.975, seed: 0.055, grain: 190 },   // water: short fine hairs
-  { step: 0.95, fade: 0.988, seed: 0.030, grain: 110 },   // smoke: long soft strokes
-  { step: 0.70, fade: 0.982, seed: 0.045, grain: 260 }    // stars: fine points
+  // Hair length = flow speed × how long a streak survives. Too short and it reads as
+  // sand; too long and the swirls smear into ribbons. These land on distinct strands.
+  { step: 0.50, fade: 0.953, seed: 0.095, grain: 300 },
+  { step: 0.70, fade: 0.966, seed: 0.070, grain: 230 },
+  { step: 0.44, fade: 0.946, seed: 0.105, grain: 400 }
 ];
 
 // ---------------------------------------------------------------- vortices
 // Dragging something through a fluid does not make ONE swirl — it sheds a street of them,
 // spinning alternately. Copying that is what makes a swipe look like stirring rather than
 // smearing, and it is why the reference photo is full of paired eddies.
-const MAXV = 24;
+const MAXV = 28;
 let vorts = [];
 let spin = 1;
 function addVortex(x,y,strength,radius,life){
@@ -282,11 +293,11 @@ function addVortex(x,y,strength,radius,life){
   if (vorts.length > MAXV) vorts.shift();
 }
 function ambient(){
-  addVortex(Math.random(), 0.15+Math.random()*0.7,
-            (Math.random()<0.5?-1:1)*(0.10+Math.random()*0.20),
-            0.35+Math.random()*0.55, 14+Math.random()*14);
+  addVortex(Math.random(), 0.10+Math.random()*0.80,
+            (Math.random()<0.5?-1:1)*(0.09+Math.random()*0.15),
+            0.11+Math.random()*0.26, 16+Math.random()*16);
 }
-for(let i=0;i<9;i++) ambient();
+for(let i=0;i<20;i++) ambient();
 
 function updateVortices(dt){
   for(const v of vorts){
@@ -298,7 +309,7 @@ function updateVortices(dt){
     v.y = Math.min(0.95, Math.max(0.05, v.y));
   }
   vorts = vorts.filter(v => v.age < v.life);
-  if (vorts.length < 9 && Math.random() < dt*0.7) ambient();
+  if (vorts.length < 20 && Math.random() < dt*2.2) ambient();
 }
 function packVortices(buf){
   let n = 0;
@@ -327,15 +338,15 @@ function handStir(h, x, y){
   const d=Math.hypot(dx*ASPECT, y-h.y);
   h.run += d;
   // One vortex every ~12 cm of travel, alternating spin: a vortex street.
-  if (h.run > 0.05){
+  if (h.run > 0.035){
     h.run = 0; spin = -spin;
-    addVortex(x, y, spin*(0.34 + Math.min(d*40,0.5)), 0.28+Math.random()*0.18, 9+Math.random()*7);
+    addVortex(x, y, spin*(0.26 + Math.min(d*36,0.42)), 0.14+Math.random()*0.14, 9+Math.random()*7);
   }
   h.x=x; h.y=y;
 }
 canvas.addEventListener('pointerdown',e=>{ const p=toPano(e);
   mouse={x:p.x,y:p.y,id:(Math.random()*5)|0,run:0};
-  addVortex(p.x,p.y,(Math.random()<0.5?-1:1)*0.45,0.34,10);
+  addVortex(p.x,p.y,(Math.random()<0.5?-1:1)*0.38,0.17,10);
   try{canvas.setPointerCapture(e.pointerId);}catch(_){} });
 canvas.addEventListener('pointermove',e=>{ if(!mouse) return; const p=toPano(e); handStir(mouse,p.x,p.y); });
 window.addEventListener('pointerup',()=>{ mouse=null; });
