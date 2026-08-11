@@ -173,14 +173,18 @@ const fadeProg = link(
    precision highp float; uniform float uF; out vec4 o;
    void main(){ o=vec4(uF,uF,uF,1.0); }`);
 
+// Strands are QUADS with a soft edge, not GL_LINES. Measured against the reference, a
+// strand there is about 3 cm wide on the floor; WebGL line width is 1 px on essentially
+// every driver, so a line-based version can only ever look like thread. The extra `aEdge`
+// runs -1..1 across the ribbon and feathers it.
 const lineProg = link(
   `#version 300 es
-   layout(location=0) in vec2 aPos; layout(location=1) in vec3 aCol;
-   out vec3 vCol;
-   void main(){ vCol=aCol; gl_Position=vec4(aPos*2.0-1.0,0.,1.); }`,
+   layout(location=0) in vec2 aPos; layout(location=1) in vec3 aCol; layout(location=2) in float aEdge;
+   out vec3 vCol; out float vEdge;
+   void main(){ vCol=aCol; vEdge=aEdge; gl_Position=vec4(aPos*2.0-1.0,0.,1.); }`,
   `#version 300 es
-   precision highp float; in vec3 vCol; out vec4 o;
-   void main(){ o=vec4(vCol,1.0); }`);
+   precision highp float; in vec3 vCol; in float vEdge; out vec4 o;
+   void main(){ float a = 1.0 - vEdge*vEdge; o=vec4(vCol*a*a,1.0); }`);
 
 const blurProg = link(
   `#version 300 es
@@ -228,14 +232,17 @@ const U = (p, n) => gl.getUniformLocation(p, n);
 
 // ---------------------------------------------------------------- particles
 const PARAMS = [
-  { n: 17000, fade: 0.972, gain: 0.62, life: [10, 22], exp: 0.95, glow: 0.20 },
-  { n: 12000, fade: 0.984, gain: 0.42, life: [14, 30], exp: 0.90, glow: 0.26 },
-  { n: 24000, fade: 0.962, gain: 0.72, life: [ 8, 17], exp: 0.95, glow: 0.20 }
+  // Measured off the clip: floor mean ≈ 61/255, median ≈ 50, under 10% pure black, and
+  // strands about 3 cm wide. Density and gain are set to hit those, not to taste.
+  { n: 15000, fade: 0.975, gain: 0.46, life: [10, 22], exp: 1.0, glow: 0.22, width: 0.0042 },
+  { n: 10000, fade: 0.986, gain: 0.32, life: [14, 30], exp: 1.0, glow: 0.26, width: 0.0055 },
+  { n: 24000, fade: 0.968, gain: 0.36, life: [ 8, 17], exp: 1.0, glow: 0.20, width: 0.0032 }
 ];
 const NMAX = 24000;   // must be >= the largest PARAMS[].n
 const px = new Float32Array(NMAX), py = new Float32Array(NMAX);
 const pl = new Float32Array(NMAX), pmax = new Float32Array(NMAX), pv = new Float32Array(NMAX);
-const verts = new Float32Array(NMAX * 2 * 5);   // 2 vertices × (x,y,r,g,b)
+const VF = 6;                                    // x, y, r, g, b, edge
+const verts = new Float32Array(NMAX * 6 * VF);   // 6 vertices (2 triangles) per segment
 function respawn(i, P) {
   px[i] = Math.random();
   py[i] = 0.03 + Math.random() * 0.94;
@@ -248,9 +255,32 @@ for (let i = 0; i < NMAX; i++) respawn(i, PARAMS[0]);
 const lineVao = gl.createVertexArray(); gl.bindVertexArray(lineVao);
 const lineVbo = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, lineVbo);
 gl.bufferData(gl.ARRAY_BUFFER, verts.byteLength, gl.DYNAMIC_DRAW);
-gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 20, 0);
-gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 20, 8);
+// Stride 24, three attributes: x,y | r,g,b | edge. This MUST match the 6 floats emitQuad
+// writes. It did not, briefly, and the symptom was not "slightly wrong colours" — the GPU
+// read positions from the middle of the previous vertex, drew triangles the size of the
+// room, and the wall went solid white.
+gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 24, 0);
+gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 8);
+gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 1, gl.FLOAT, false, 24, 20);
 gl.bindVertexArray(null);
+
+// One segment → two triangles. Width is given in WALL HEIGHTS and converted per axis, so
+// a strand keeps the same physical thickness whichever way it runs on a 9.58:1 canvas.
+// GL_LINES cannot do this: line width is 1 px on essentially every driver, which is why
+// the line-based version could only ever look like thread.
+function emitQuad(buf, o, x0, y0, x1, y1, hw, r, g, b) {
+  let dx = (x1 - x0) * ASPECT, dy = y1 - y0;
+  const L = Math.hypot(dx, dy) || 1;
+  const nx = (-dy / L) * hw / ASPECT, ny = (dx / L) * hw;
+  const ax = x0 - nx, ay = y0 - ny, bx = x0 + nx, by = y0 + ny;
+  const cx = x1 - nx, cy = y1 - ny, ex = x1 + nx, ey = y1 + ny;
+  const V = [ax,ay,-1, bx,by,1, cx,cy,-1,  bx,by,1, ex,ey,1, cx,cy,-1];
+  for (let i = 0; i < 6; i++) {
+    const j = o + i * 6;
+    buf[j] = V[i*3]; buf[j+1] = V[i*3+1];
+    buf[j+2] = r; buf[j+3] = g; buf[j+4] = b; buf[j+5] = V[i*3+2];
+  }
+}
 
 // Hand positions/colours, flattened for the inner loop — object lookups per particle per
 // frame at this count are not free.
@@ -288,12 +318,15 @@ function stepParticles(dt, t, P, hands) {
     // COLOUR. Two things stop a big blue wall going monotone: slow-moving water sits
     // deeper and colder, fast water runs towards white; and a very slow tint drifts across
     // the room so no two areas are quite the same hue.
+    // Colour balance taken from the clip: R:G:B ≈ 0.29 : 0.48 : 1.0. Faster water runs
+    // towards white, and a very slow tint drifts across the room so a 23 m wall is never
+    // one flat colour.
     const fast = Math.min(1, sp * 3.2);
     const drift = vnoise(x * 1.5 + t * 0.02, y * 1.5);
-    const teal = 0.55 + 0.45 * drift;             // 0 = indigo, 1 = teal
-    let cr = (0.10 + 0.55 * fast) * (0.75 + 0.25 * (1 - teal));
-    let cg = (0.28 + 0.62 * fast) * (0.70 + 0.45 * teal);
-    let cb = (0.62 + 0.38 * fast);
+    const teal = 0.55 + 0.45 * drift;
+    let cr = (0.29 + 0.45 * fast) * (0.80 + 0.20 * (1 - teal));
+    let cg = (0.48 + 0.42 * fast) * (0.82 + 0.30 * teal);
+    let cb = (1.00 + 0.00 * fast);
     // A hand's colour is stirred into the water near it and washes out again downstream.
     if (tintN) {
       for (let k = 0; k < tintN; k++) {
@@ -308,11 +341,7 @@ function stepParticles(dt, t, P, hands) {
     }
 
     let dx = x - x0; dx -= Math.round(dx);       // do not draw across the seam
-    const o = w * 10;
-    verts[o]   = x0;     verts[o+1] = y0;
-    verts[o+2] = b*cr;   verts[o+3] = b*cg;   verts[o+4] = b*cb;
-    verts[o+5] = x0+dx;  verts[o+6] = y;
-    verts[o+7] = b*cr;   verts[o+8] = b*cg;   verts[o+9] = b*cb;
+    emitQuad(verts, w * 36, x0, y0, x0 + dx, y, P.width, b*cr, b*cg, b*cb);
     w++;
   }
   return w;
@@ -328,7 +357,7 @@ const svx = new Float32Array(SMAX), svy = new Float32Array(SMAX);
 const sl = new Float32Array(SMAX), sm = new Float32Array(SMAX);
 const sr = new Float32Array(SMAX), sg = new Float32Array(SMAX), sb = new Float32Array(SMAX);
 let sn = 0;
-const sverts = new Float32Array(SMAX * 2 * 5);
+const sverts = new Float32Array(SMAX * 6 * 6);
 
 function spawnSparks(x, y, col, n, power) {
   for (let i = 0; i < n; i++) {
@@ -360,13 +389,9 @@ function stepSparks(dt, t) {
     if (y < 0.02 || y > 0.98) { sl[i] = sm[i]; continue; }
     sx[i] = x; sy[i] = y;
 
-    const b = 2.4 * Math.min(1, life * 14) * Math.pow(1 - life, 1.6);
+    const b = 1.1 * Math.min(1, life * 14) * Math.pow(1 - life, 1.6);
     let dx = x - x0; dx -= Math.round(dx);
-    const o = w * 10;
-    sverts[o]   = x0;      sverts[o+1] = y0;
-    sverts[o+2] = b*sr[i]; sverts[o+3] = b*sg[i]; sverts[o+4] = b*sb[i];
-    sverts[o+5] = x0+dx;   sverts[o+6] = y;
-    sverts[o+7] = b*sr[i]; sverts[o+8] = b*sg[i]; sverts[o+9] = b*sb[i];
+    emitQuad(sverts, w * 36, x0, y0, x0 + dx, y, 0.0035, b*sr[i], b*sg[i], b*sb[i]);
     w++;
   }
   return w;
@@ -375,8 +400,9 @@ function stepSparks(dt, t) {
 const sparkVao = gl.createVertexArray(); gl.bindVertexArray(sparkVao);
 const sparkVbo = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, sparkVbo);
 gl.bufferData(gl.ARRAY_BUFFER, sverts.byteLength, gl.DYNAMIC_DRAW);
-gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 20, 0);
-gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 20, 8);
+gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 24, 0);
+gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 8);
+gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 1, gl.FLOAT, false, 24, 20);
 gl.bindVertexArray(null);
 
 // ---------------------------------------------------------------- hands
@@ -474,15 +500,15 @@ function frame() {
   gl.useProgram(lineProg);
   gl.bindVertexArray(lineVao);
   gl.bindBuffer(gl.ARRAY_BUFFER, lineVbo);
-  gl.bufferSubData(gl.ARRAY_BUFFER, 0, verts.subarray(0, count*10));
+  gl.bufferSubData(gl.ARRAY_BUFFER, 0, verts.subarray(0, count*36));
   gl.blendFunc(gl.ONE, gl.ONE);
-  gl.drawArrays(gl.LINES, 0, count*2);
+  gl.drawArrays(gl.TRIANGLES, 0, count*6);
 
   if (scount) {
     gl.bindVertexArray(sparkVao);
     gl.bindBuffer(gl.ARRAY_BUFFER, sparkVbo);
-    gl.bufferSubData(gl.ARRAY_BUFFER, 0, sverts.subarray(0, scount*10));
-    gl.drawArrays(gl.LINES, 0, scount*2);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, sverts.subarray(0, scount*36));
+    gl.drawArrays(gl.TRIANGLES, 0, scount*6);
   }
   gl.disable(gl.BLEND);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
