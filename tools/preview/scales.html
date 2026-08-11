@@ -36,28 +36,33 @@ gl.getExtension('OES_texture_float_linear');
 
 /* ---------- tham số chỉnh sống ---------- */
 const P = {
-  tile:   20,    // cạnh mỗi vảy (px)
-  push:   1.35,  // lực tay hất vảy
+  tile:   22,    // cạnh mỗi vảy (px)
+  push:   3.58,  // lực tay hất vảy
   rad:    0.13,  // bán kính ảnh hưởng của tay
-  coup:   0.42,  // độ lan sóng sang vảy bên cạnh
+  coup:   0.23,  // độ lan sóng sang vảy bên cạnh
   stiff:  9.0,   // lò xo kéo vảy về vị trí nghỉ
   damp:   1.35,  // tắt dần
-  amb:    2.00,  // sóng nền khi không ai chạm
-  jit:    0.30,  // độ lệch ngẫu nhiên của từng vảy
-  gap:    0.07,  // khe hở giữa các vảy
+  amb:    0.72,  // sóng nền khi không ai chạm
+  jit:    0.24,  // độ lệch ngẫu nhiên của từng vảy
+  gap:    0.00,  // khe hở giữa các vảy khi đứng yên
   corr:   9.0,   // cỡ mảng: bao nhiêu vảy cùng nghiêng một hướng
-  bevel:  0.55,  // vát mép (làm ra viền sáng)
+  bevel:  0.40,  // vát mép (làm ra viền sáng)
   sharp:  34,    // độ bóng (đèn gắt/toè)
   key:    2.60,  // độ mạnh đèn chính
-  bloom:  0.28,  // quầng sáng
-  exp:    1.00,  // độ sáng tổng
+  bloom:  0.13,  // quầng sáng
+  exp:    1.03,  // độ sáng tổng
+  sep:    14.0,  // lực đẩy các vảy TÁCH ra khỏi chỗ chạm
+  sepK:   7.0,   // lò xo kéo các vảy khép lại
+  sepD:   2.20,  // tắt dần của chuyển động tách
+  sepGap: 0.85,  // khe hở mở ra bao nhiêu khi tách
+  glow:   2.20,  // đèn nằm SAU lớp khảm, bục qua khe nứt
 };
 const PALS = [
   {name:'BẠC',  tint:[0.74,0.78,0.84], lo:[0.004,0.005,0.008], hi:[0.026,0.031,0.042], rim:[0.62,0.76,1.00]},
   {name:'ĐỒNG', tint:[1.00,0.76,0.36], lo:[0.007,0.004,0.002], hi:[0.036,0.024,0.011], rim:[1.00,0.82,0.50]},
   {name:'LAM',  tint:[0.56,0.74,0.90], lo:[0.002,0.004,0.010], hi:[0.014,0.028,0.050], rim:[0.45,0.90,1.00]},
 ];
-let pal = 0;
+let pal = 1;
 
 /* ---------- helpers ---------- */
 function sh(t, src){ const s=gl.createShader(t); gl.shaderSource(s,src); gl.compileShader(s);
@@ -131,17 +136,45 @@ void main(){
 
   v += f*uDt;
   t += v*uDt;
-  t = clamp(t, -0.85, 0.85);
+  t = clamp(t, -0.50, 0.50);
   o = vec4(t, v);
+}`);
+
+/* ---------- 1b. mô phỏng vị trí: chạm thì các vảy bị ĐẨY RA XA tâm chạm ---------- */
+const DSP = prog(VS, `#version 300 es
+precision highp float;
+in vec2 vUv; out vec4 o;
+uniform sampler2D uState;       // xy = vảy dịch đi bao nhiêu ô, zw = vận tốc
+uniform vec2  uTexel;
+uniform float uDt, uK, uDamp, uCoup, uAspect, uSep, uRad;
+uniform vec3  uHand;
+void main(){
+  vec4 s = texture(uState, vUv);
+  vec2 d = s.xy, v = s.zw;
+  vec2 lap = texture(uState, vUv+vec2(uTexel.x,0.0)).xy
+           + texture(uState, vUv-vec2(uTexel.x,0.0)).xy
+           + texture(uState, vUv+vec2(0.0,uTexel.y)).xy
+           + texture(uState, vUv-vec2(0.0,uTexel.y)).xy - 4.0*d;
+  vec2 f = -uK*d + uCoup*lap*60.0 - uDamp*v;
+
+  // đẩy hướng RA XA chỗ chạm -> quanh bàn tay các vảy giãn ra, khe hở mở
+  vec2 q = (vUv - uHand.xy)*vec2(uAspect,1.0);
+  float w = exp(-dot(q,q)/(uRad*uRad));
+  f += normalize(q + 1e-5) * uSep * w * uHand.z;
+
+  v += f*uDt;
+  d += v*uDt;
+  d = clamp(d, -3.0, 3.0);
+  o = vec4(d, v);
 }`);
 
 /* ---------- 2. dựng hình: mỗi ô = 1 tấm kim loại có vát mép, phản chiếu môi trường ---------- */
 const REN = prog(VS, `#version 300 es
 precision highp float;
 in vec2 vUv; out vec4 o;
-uniform sampler2D uState;
+uniform sampler2D uState, uDisp;
 uniform vec2  uGrid;
-uniform float uAspect, uGap, uBevel, uJit, uSharp, uKey, uExp, uCorr;
+uniform float uAspect, uGap, uBevel, uJit, uSharp, uKey, uExp, uCorr, uSepGap, uGlow;
 uniform vec3  uTint, uLo, uHi, uRim;
 
 float h1(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }
@@ -168,9 +201,19 @@ vec3 env(vec3 r){
 }
 
 void main(){
-  float rowOff = h1(vec2(floor(vUv.y*uGrid.y), 3.7));
-  vec2 g  = vec2(vUv.x*uGrid.x + rowOff*0.5, vUv.y*uGrid.y);
+  // dời cả mảng khảm theo trường vị trí -> vảy đi theo tay
+  vec2 dsp = texture(uDisp, vUv).xy;
+  vec2 gw  = vUv*uGrid - dsp;
+  float rowOff = h1(vec2(floor(gw.y), 3.7));
+  vec2 g  = vec2(gw.x + rowOff*0.5, gw.y);
   vec2 id = floor(g);
+
+  // ĐỘ GIÃN của trường vị trí = các vảy đang rời xa nhau bao nhiêu -> khe mở ra bấy nhiêu.
+  // Chỉ dời thôi thì cả mảng trượt đi chứ không tách; phải trừ theo độ giãn mới ra vết nứt.
+  vec2 ex = vec2(1.0/uGrid.x, 0.0), ey = vec2(0.0, 1.0/uGrid.y);
+  float dv = (texture(uDisp, vUv+ex).x - texture(uDisp, vUv-ex).x)*0.5
+           + (texture(uDisp, vUv+ey).y - texture(uDisp, vUv-ey).y)*0.5;
+  float sep = clamp(dv*uSepGap, 0.0, 0.14);
   vec2 f  = fract(g) - 0.5;
 
   float r1 = h1(id), r2 = h1(id+17.3), r3 = h1(id+91.7);
@@ -178,10 +221,11 @@ void main(){
   // mỗi tấm lệch góc + lệch cỡ một chút -> khảm thủ công, không ra caro máy móc
   float ang = (r1-0.5)*0.38;
   vec2  q   = rot(f, ang);
-  float hw = 0.5 - uGap*0.5 - r2*0.10;
+  float hw = max(0.5 - uGap*0.5 - r2*0.10 - sep, 0.11);
 
   float e = max(abs(q.x), abs(q.y));
-  if (e > hw) { o = vec4(uLo*0.12, 1.0); return; }   // khe hở giữa các tấm: gần như đen
+  // khe hở: gần như đen, nhưng khi bị tách thì có ánh sáng lọt qua vết nứt
+  if (e > hw) { o = vec4(uLo*0.12 + mix(uRim,uTint,0.75)*uGlow*(sep*0.55 + sep*sep*3.2), 1.0); return; }
 
   vec2 st = texture(uState, (id+0.5)/uGrid).xy;
 
@@ -238,14 +282,15 @@ void main(){
 }`);
 
 /* ---------- tài nguyên ---------- */
-let state, scene, bl1, bl2, GW=0, GH=0;
+let state, disp, scene, bl1, bl2, GW=0, GH=0;
 function alloc(){
   const W = cv.width, H = cv.height;
   GW = Math.max(8, Math.round(W / P.tile));
   GH = Math.max(8, Math.round(H / P.tile));
   state = dbl(GW, GH, gl.LINEAR, true);
+  disp  = dbl(GW, GH, gl.LINEAR, true);
   // xoá về 0 để không bắt đầu bằng rác bộ nhớ
-  for (const s of [state.a, state.b]) {
+  for (const s of [state.a, state.b, disp.a, disp.b]) {
     gl.bindFramebuffer(gl.FRAMEBUFFER, s.f); gl.clearColor(0,0,0,0); gl.clear(gl.COLOR_BUFFER_BIT);
   }
   scene = fbo(W, H, gl.LINEAR, true);
@@ -308,17 +353,33 @@ function frame(now){
     gl.uniform3f(SIM._u.uHand,  hand.x, hand.y, 1);
     gl.uniform2f(SIM._u.uHandV, hand.vx, hand.vy);
     draw(SIM, state.b); state.swap();
+
+    gl.useProgram(DSP);
+    bind(DSP,'uState', disp.a.t, 0);
+    gl.uniform2f(DSP._u.uTexel, 1/GW, 1/GH);
+    gl.uniform1f(DSP._u.uDt, dt);
+    gl.uniform1f(DSP._u.uK,    P.sepK);
+    gl.uniform1f(DSP._u.uDamp, P.sepD);
+    gl.uniform1f(DSP._u.uCoup, P.coup*0.5);
+    gl.uniform1f(DSP._u.uAspect, aspect);
+    gl.uniform1f(DSP._u.uSep,  P.sep);
+    gl.uniform1f(DSP._u.uRad,  P.rad);
+    gl.uniform3f(DSP._u.uHand, hand.x, hand.y, 1);
+    draw(DSP, disp.b); disp.swap();
   }
 
   const pl = PALS[pal];
   gl.useProgram(REN);
   bind(REN,'uState', state.a.t, 0);
+  bind(REN,'uDisp', disp.a.t, 1);
   gl.uniform2f(REN._u.uGrid, GW, GH);
   gl.uniform1f(REN._u.uAspect, aspect);
   gl.uniform1f(REN._u.uGap, P.gap);
   gl.uniform1f(REN._u.uBevel, P.bevel);
   gl.uniform1f(REN._u.uJit, P.jit);
   gl.uniform1f(REN._u.uCorr, P.corr);
+  gl.uniform1f(REN._u.uSepGap, P.sepGap);
+  gl.uniform1f(REN._u.uGlow, P.glow);
   gl.uniform1f(REN._u.uSharp, P.sharp);
   gl.uniform1f(REN._u.uKey, P.key);
   gl.uniform1f(REN._u.uExp, P.exp);
@@ -357,6 +418,11 @@ const SL = [
   ['bevel','vát mép',0,1.5,.01],
   ['sharp','độ bóng',6,140,1],
   ['key','đèn chính',0,3,.01],
+  ['sep','lực tách khối',0,60,.5],
+  ['sepGap','độ mở khe',0,3,.02],
+  ['glow','đèn sau khe nứt',0,5,.02],
+  ['sepK','khép lại nhanh',1,30,.5],
+  ['sepD','tách tắt dần',.3,8,.1],
   ['bloom','quầng sáng',0,2,.01],
   ['exp','độ sáng',.3,3,.01],
 ];
