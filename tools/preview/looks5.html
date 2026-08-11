@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<title>LiDAR Wall — KHÓI / MỰC</title>
+<style>
+  :root { color-scheme: dark; }
+  html,body { margin:0; background:#07080c; color:#c8d4e4;
+    font:13px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .wrap { max-width:1500px; margin:0 auto; padding:18px 20px 40px; }
+  h1 { font-size:15px; font-weight:600; letter-spacing:.14em; color:#8fb8dd; margin:0 0 4px; }
+  .sub { color:#5d6b80; margin:0 0 16px; }
+  canvas { display:block; width:100%; border-radius:6px; background:#000; cursor:crosshair; touch-action:none; }
+  .bar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:14px 0 10px; }
+  button { font:inherit; color:#b9c9dc; background:#131722; border:1px solid #26304a;
+           padding:7px 14px; border-radius:5px; cursor:pointer; }
+  button:hover { border-color:#3d5686; color:#e6f0fb; }
+  button.on { background:#1d2942; border-color:#5b83c8; color:#eaf3ff; }
+  #ctl { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:6px 14px;
+         margin:12px 0 0; padding:10px 12px; background:#0d1119; border:1px solid #1c2436; border-radius:6px; }
+  #ctl label { display:flex; align-items:center; gap:8px; font-size:11px; color:#7f92ab; }
+  #ctl label span { width:110px; flex:none; }
+  #ctl input { flex:1; accent-color:#5b83c8; }
+  #ctl b { color:#cfe0f2; width:44px; text-align:right; font-weight:500; }
+  .desc { color:#7e8ea6; margin:12px 0 0; max-width:80ch; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>LiDAR WALL — KHÓI / MỰC TRONG NƯỚC</h1>
+  <p class="sub">Mô phỏng chất lỏng thật (Navier–Stokes + giữ xoáy). Cuộn khói, tua rua, nấm khói đều
+    TỰ SINH từ vật lý. Giữ chuột và kéo — khói phụt ra từ tay và cuộn theo tay.</p>
+
+  <div class="bar">
+    <button data-pal="0" class="on">VÀNG trên đen</button>
+    <button data-pal="1">NGŨ SẮC pastel</button>
+    <button data-pal="2">XANH lạnh</button>
+    <span style="flex:1"></span>
+    <button id="viewBtn">Đang xem: 1 TƯỜNG (560×240)</button>
+    <button id="clearBtn">Xoá</button>
+  </div>
+
+  <canvas id="c"></canvas>
+  <div id="ctl"></div>
+  <p class="desc">Kéo chuột để phụt khói. Các thanh dưới chỉnh sống, không cần tải lại.</p>
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl2', { alpha:false, antialias:false });
+if (!gl || !gl.getExtension('EXT_color_buffer_float')) {
+  document.body.innerHTML = '<p style="padding:40px">Trình duyệt thiếu WebGL2 hoặc float render target.</p>';
+}
+const ASPECT = 10350/1080, WALL = 560/240;
+let viewFull = false, pal = 0;
+
+// ---------------------------------------------------------------- gl helpers
+const VS = `#version 300 es
+layout(location=0) in vec2 a; out vec2 vUv; out vec2 vL; out vec2 vR; out vec2 vT; out vec2 vB;
+uniform vec2 uTexel;
+void main(){ vUv=a*0.5+0.5; vL=vUv-vec2(uTexel.x,0.); vR=vUv+vec2(uTexel.x,0.);
+  vT=vUv+vec2(0.,uTexel.y); vB=vUv-vec2(0.,uTexel.y); gl_Position=vec4(a,0.,1.); }`;
+const HEAD = `#version 300 es
+precision highp float; precision highp sampler2D;
+in vec2 vUv; in vec2 vL; in vec2 vR; in vec2 vT; in vec2 vB; out vec4 o;
+float h21(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453123); }
+float vn(vec2 x){ vec2 i=floor(x),f=fract(x); vec2 u=f*f*(3.-2.*f);
+  return mix(mix(h21(i),h21(i+vec2(1,0)),u.x),mix(h21(i+vec2(0,1)),h21(i+vec2(1,1)),u.x),u.y); }
+float fbm(vec2 x){ float s=0.,a=.5; for(int i=0;i<4;i++){ s+=a*vn(x); x*=2.03; a*=.5; } return s; }
+`;
+function sh(t,src){ const s=gl.createShader(t); gl.shaderSource(s,src); gl.compileShader(s);
+  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; }
+function prog(fs){ const p=gl.createProgram(); gl.attachShader(p,sh(gl.VERTEX_SHADER,VS));
+  gl.attachShader(p,sh(gl.FRAGMENT_SHADER,fs)); gl.linkProgram(p);
+  if(!gl.getProgramParameter(p,gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p)); return p; }
+function fbo(w,h,filter){ const t=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,t);
+  const f=filter||gl.LINEAR;
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,f);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,f);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA16F,w,h,0,gl.RGBA,gl.HALF_FLOAT,null);
+  const fb=gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER,fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,t,0);
+  gl.viewport(0,0,w,h); gl.clearColor(0,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null); return {t,f:fb,w,h,tx:1/w,ty:1/h}; }
+function dbl(w,h){ let a=fbo(w,h),b=fbo(w,h);
+  return { get read(){return a;}, get write(){return b;}, swap(){const t=a;a=b;b=t;}, w,h,tx:1/w,ty:1/h }; }
+const vao=gl.createVertexArray(); gl.bindVertexArray(vao);
+const vbo=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,vbo);
+gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
+function blit(t){ gl.bindVertexArray(vao);
+  if(t){ gl.viewport(0,0,t.w,t.h); gl.bindFramebuffer(gl.FRAMEBUFFER,t.f); }
+  else { gl.viewport(0,0,canvas.width,canvas.height); gl.bindFramebuffer(gl.FRAMEBUFFER,null); }
+  gl.drawArrays(gl.TRIANGLES,0,3); }
+const U=(p,n)=>gl.getUniformLocation(p,n);
+
+// ---------------------------------------------------------------- fluid solver
+// Textbook incompressible solve, in the order that matters:
+//   force → vorticity confinement → divergence → pressure → project → advect
+// Vorticity confinement is not optional here: plain advection eats small eddies within a
+// few frames and smoke without eddies reads as fog. Feeding that lost energy back along
+// the curl gradient is what produces the curling, mushrooming plumes in the reference.
+const SIM_H = 280, SIM_W = Math.round(SIM_H*ASPECT);
+const vel = dbl(SIM_W, SIM_H), dye = dbl(SIM_W, SIM_H);
+const prs = dbl(SIM_W, SIM_H), div = fbo(SIM_W, SIM_H, gl.NEAREST), crl = fbo(SIM_W, SIM_H, gl.NEAREST);
+
+const pAdvect = prog(HEAD+`uniform sampler2D uVel,uSrc; uniform vec2 uTexel; uniform float uDt,uDiss;
+void main(){ vec2 c=vUv - uDt*texture(uVel,vUv).xy*uTexel; c.x=fract(c.x);
+  o = texture(uSrc,c)/(1.0+uDiss*uDt); }`);
+const pSplat = prog(HEAD+`uniform sampler2D uT; uniform float uA,uR; uniform vec2 uP; uniform vec4 uV;
+void main(){ vec2 p=vUv-uP; p.x-=round(p.x); p.x*=uA;
+  float g=exp(-dot(p,p)/uR); o = texture(uT,vUv) + uV*g; }`);
+const pCurl = prog(HEAD+`uniform sampler2D uVel;
+void main(){ float L=texture(uVel,vL).y,R=texture(uVel,vR).y,T=texture(uVel,vT).x,B=texture(uVel,vB).x;
+  o=vec4(0.5*(R-L-T+B),0.,0.,1.); }`);
+const pVort = prog(HEAD+`uniform sampler2D uVel,uCurl; uniform float uK,uDt;
+void main(){ float L=texture(uCurl,vL).x,R=texture(uCurl,vR).x,T=texture(uCurl,vT).x,B=texture(uCurl,vB).x;
+  float C=texture(uCurl,vUv).x;
+  vec2 f=0.5*vec2(abs(T)-abs(B), abs(R)-abs(L));
+  f/=length(f)+1e-4; f*=uK*C; f.y*=-1.0;
+  o=vec4(clamp(texture(uVel,vUv).xy+f*uDt,-1500.,1500.),0.,1.); }`);
+const pDiv = prog(HEAD+`uniform sampler2D uVel; uniform vec2 uTexel;
+void main(){ float L=texture(uVel,vL).x,R=texture(uVel,vR).x,T=texture(uVel,vT).y,B=texture(uVel,vB).y;
+  vec2 C=texture(uVel,vUv).xy;
+  if(vUv.y-uTexel.y<0.0) B=-C.y; if(vUv.y+uTexel.y>1.0) T=-C.y;
+  o=vec4(0.5*(R-L+T-B),0.,0.,1.); }`);
+const pPrs = prog(HEAD+`uniform sampler2D uP,uD;
+void main(){ float L=texture(uP,vL).x,R=texture(uP,vR).x,T=texture(uP,vT).x,B=texture(uP,vB).x;
+  o=vec4((L+R+B+T-texture(uD,vUv).x)*0.25,0.,0.,1.); }`);
+const pGrad = prog(HEAD+`uniform sampler2D uP,uVel; uniform vec2 uTexel;
+void main(){ float L=texture(uP,vL).x,R=texture(uP,vR).x,T=texture(uP,vT).x,B=texture(uP,vB).x;
+  vec2 v=texture(uVel,vUv).xy-vec2(R-L,T-B);
+  if(vUv.y<uTexel.y||vUv.y>1.0-uTexel.y) v.y=0.0;
+  o=vec4(v,0.,1.); }`);
+const pClear = prog(HEAD+`uniform sampler2D uT; uniform float uV; void main(){ o=uV*texture(uT,vUv); }`);
+// Buoyancy + a little curl noise. Smoke that only gets pushed by hands sits where it was
+// left; a gentle rise plus turbulence keeps it alive and gives the plume its shape.
+const pForce = prog(HEAD+`uniform sampler2D uVel,uDye; uniform float uDt,uBuoy,uTurb,uTime,uA;
+void main(){
+  vec3 d=texture(uDye,vUv).rgb; float m=max(d.r,max(d.g,d.b));
+  vec2 p=vec2(vUv.x*uA,vUv.y);
+  float e=0.12;
+  float n0=fbm(p*1.1+vec2(uTime*0.05,0.0));
+  float nx=fbm(p*1.1+vec2(e+uTime*0.05,0.0))-n0;
+  float ny=fbm(p*1.1+vec2(uTime*0.05,e))-n0;
+  vec2 turb=vec2(ny,-nx)/e*uTurb;
+  vec2 v=texture(uVel,vUv).xy + (vec2(0.0,uBuoy*m)+turb)*uDt;
+  // Bleed off the upward push near the ceiling, or every plume ends as a flat slab
+  // pressed against the top of the wall.
+  float cap = smoothstep(0.72, 1.0, vUv.y);
+  v.y -= v.y * cap * 3.5 * uDt;
+  o=vec4(v,0.,1.); }`);
+
+// ---------------------------------------------------------------- render
+// Fake volumetric shading. The density field is treated as a height/depth: its gradient
+// gives a normal, and marching a few steps towards the light gives self-shadowing. Those
+// two things are the whole difference between "coloured fog" and something that looks
+// like it has volume and is lit from one side.
+const pShow = prog(HEAD+`
+uniform sampler2D uDye; uniform vec2 uView, uSimTexel;
+uniform float uExp, uSoft, uShadow, uRim, uGrain, uTime, uA;
+uniform vec3 uCol1, uCol2, uCol3, uBg;
+vec4 D(vec2 uv){ return texture(uDye, vec2(fract(uv.x), clamp(uv.y,0.0,1.0))); }
+void main(){
+  vec2 uv = vec2(uView.y + vUv.x*uView.x, vUv.y);
+  vec3 d = D(uv).rgb;
+  float m = max(d.r,max(d.g,d.b));
+
+  vec2 e = uSimTexel*1.5;
+  float mx = max(D(uv+vec2(e.x,0.)).r*0.34+D(uv+vec2(e.x,0.)).g*0.4+D(uv+vec2(e.x,0.)).b*0.26,0.0)
+           - max(D(uv-vec2(e.x,0.)).r*0.34+D(uv-vec2(e.x,0.)).g*0.4+D(uv-vec2(e.x,0.)).b*0.26,0.0);
+  float my = max(D(uv+vec2(0.,e.y)).r*0.34+D(uv+vec2(0.,e.y)).g*0.4+D(uv+vec2(0.,e.y)).b*0.26,0.0)
+           - max(D(uv-vec2(0.,e.y)).r*0.34+D(uv-vec2(0.,e.y)).g*0.4+D(uv-vec2(0.,e.y)).b*0.26,0.0);
+  vec3 n = normalize(vec3(-mx*uSoft, -my*uSoft, 1.0));
+  vec3 L = normalize(vec3(-0.45, 0.72, 0.52));
+  float lam = clamp(dot(n,L),0.0,1.0);
+
+  // Self-shadow: walk towards the light and add up what is in the way.
+  float sh = 0.0;
+  vec2 st = vec2(L.x, L.y) * uSimTexel * 3.0;
+  for (int i=1;i<=6;i++){ vec3 s=D(uv+st*float(i)).rgb; sh += max(s.r,max(s.g,s.b)); }
+  sh = exp(-sh*uShadow);
+
+  // Colour by density: thin edges take the bright tint, the thick core the deep one.
+  float t = clamp(m*1.9,0.0,1.0);
+  vec3 albedo = mix(uCol1, uCol2, smoothstep(0.0,0.30,t));
+  albedo = mix(albedo, uCol3, smoothstep(0.45,0.95,t));
+
+  float rim = pow(clamp(1.0-n.z,0.0,1.0),1.6);
+  vec3 c = albedo * (0.16 + 1.15*lam*sh);
+  c += uCol2 * rim * m * uRim;
+  c *= smoothstep(0.0,0.06,m);              // black where there is no smoke at all
+  c += uBg;
+
+  // Compress LUMINANCE so hot cores keep their hue instead of turning white.
+  c *= uExp;
+  float Lm = max(max(c.r,c.g),c.b);
+  c *= (Lm>1e-4) ? (Lm/(1.0+Lm))/Lm : 0.0;
+
+  float g = fract(sin(dot(vUv*vec2(1920.,1080.)+uTime, vec2(12.9898,78.233)))*43758.5453);
+  c += (g-0.5)*uGrain;
+  float v = smoothstep(0.0,0.08,vUv.y)*smoothstep(0.0,0.07,1.0-vUv.y);
+  o = vec4(pow(clamp(c*mix(1.0,v,0.25),0.0,1.0), vec3(0.94)), 1.0);
+}`);
+
+// ---------------------------------------------------------------- glitter particles
+// The gold reference is full of tiny bright flecks riding the plume. They are cheap and
+// they are what makes it read as MATERIAL — ink carrying pigment — rather than gas.
+const gVS = `#version 300 es
+layout(location=0) in vec2 aPos; layout(location=1) in float aSize; layout(location=2) in vec3 aCol;
+out vec3 vCol; void main(){ vCol=aCol; gl_PointSize=max(aSize,1.5); gl_Position=vec4(aPos*2.0-1.0,0.,1.); }`;
+const gFS = `#version 300 es
+precision highp float; in vec3 vCol; out vec4 o;
+void main(){ float d=length(gl_PointCoord-0.5)*2.0; o=vec4(vCol*exp(-d*d*4.0),1.0); }`;
+function link2(vs,fs){ const p=gl.createProgram(); gl.attachShader(p,sh(gl.VERTEX_SHADER,vs));
+  gl.attachShader(p,sh(gl.FRAGMENT_SHADER,fs)); gl.linkProgram(p);
+  if(!gl.getProgramParameter(p,gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p)); return p; }
+const gProg = link2(gVS,gFS);
+const GN = 9000;
+const gx=new Float32Array(GN), gy=new Float32Array(GN), gl_=new Float32Array(GN), gm=new Float32Array(GN), gs=new Float32Array(GN);
+const gdata=new Float32Array(GN*6);
+for(let i=0;i<GN;i++){ gx[i]=Math.random(); gy[i]=Math.random(); gm[i]=3+Math.random()*7; gl_[i]=Math.random()*gm[i]; gs[i]=Math.random(); }
+const gVao=gl.createVertexArray(); gl.bindVertexArray(gVao);
+const gVbo=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,gVbo);
+gl.bufferData(gl.ARRAY_BUFFER,gdata.byteLength,gl.DYNAMIC_DRAW);
+gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0,2,gl.FLOAT,false,24,0);
+gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1,1,gl.FLOAT,false,24,8);
+gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2,3,gl.FLOAT,false,24,12);
+gl.bindVertexArray(null);
+
+// Particles are advected by reading the velocity field back once per frame at a coarse
+// resolution — one readback of a small texture, instead of a GPU particle pipeline.
+const VEL_RB_W = 128, VEL_RB_H = Math.max(8, Math.round(128/ASPECT));
+const velRB = fbo(VEL_RB_W, VEL_RB_H);
+const pDown = prog(HEAD+`uniform sampler2D uT; void main(){ o=texture(uT,vUv); }`);
+const velPix = new Float32Array(VEL_RB_W*VEL_RB_H*4);
+function sampleVel(x,y,out){
+  const fx=x*VEL_RB_W, fy=y*VEL_RB_H;
+  const i=Math.min(VEL_RB_W-1,Math.max(0,Math.floor(fx))), j=Math.min(VEL_RB_H-1,Math.max(0,Math.floor(fy)));
+  const o=(j*VEL_RB_W+i)*4; out.x=velPix[o]; out.y=velPix[o+1];
+}
+
+// ---------------------------------------------------------------- palettes
+const PALETTES = [
+  { name:'vàng', c1:[0.32,0.13,0.02], c2:[1.00,0.66,0.16], c3:[1.00,0.90,0.55], bg:[0.004,0.004,0.006],
+    glit:[1.0,0.82,0.42], exp:1.25 },
+  { name:'pastel', c1:[0.16,0.20,0.34], c2:[0.92,0.62,0.88], c3:[0.70,1.00,0.90], bg:[0.006,0.006,0.012],
+    glit:[0.95,0.85,1.0], exp:1.05 },
+  { name:'xanh', c1:[0.02,0.09,0.26], c2:[0.28,0.68,1.00], c3:[0.85,0.96,1.00], bg:[0.004,0.008,0.016],
+    glit:[0.7,0.9,1.0], exp:1.20 }
+];
+
+// ---------------------------------------------------------------- controls
+const CFG = { push:1.0, ink:1.0, vort:1.0, buoy:1.0, turb:1.0, fade:1.0, soft:1.0, shadow:1.0, glit:1.0, exp:1.0 };
+const SL = [['push','lực tay',0,3],['ink','lượng khói',0,3],['vort','độ cuộn xoáy',0,3],
+  ['buoy','khói bốc lên',0,3],['turb','nhiễu động',0,3],['fade','khói tan chậm',0.2,3],
+  ['soft','độ nổi khối',0.2,3],['shadow','đổ bóng',0,3],['glit','hạt lấp lánh',0,3],['exp','độ sáng',0.3,2.5]];
+const ctl=document.getElementById('ctl');
+for(const [k,label,lo,hi] of SL){
+  const el=document.createElement('label');
+  el.innerHTML=`<span>${label}</span><input type=range min=${lo} max=${hi} step=0.01 value=${CFG[k]}><b>${CFG[k].toFixed(2)}</b>`;
+  const inp=el.querySelector('input'), out=el.querySelector('b');
+  inp.addEventListener('input',()=>{ CFG[k]=+inp.value; out.textContent=CFG[k].toFixed(2); });
+  ctl.appendChild(el);
+}
+const cp=document.createElement('button'); cp.textContent='COPY số đang chỉnh'; cp.style.gridColumn='1 / -1';
+cp.addEventListener('click',()=>{ navigator.clipboard?.writeText(JSON.stringify(CFG,null,2));
+  cp.textContent='đã copy: '+JSON.stringify(CFG); });
+ctl.appendChild(cp);
+
+// ---------------------------------------------------------------- input
+function viewSlice(){ const view=viewFull?ASPECT:WALL, w=view/ASPECT; return {w, x: viewFull?0:0.5-w/2}; }
+function toPano(e){ const r=canvas.getBoundingClientRect(), s=viewSlice();
+  return { x:s.x+((e.clientX-r.left)/r.width)*s.w, y:1-(e.clientY-r.top)/r.height }; }
+let mouse=null, mouseT=0;
+const demo=[
+  {cx:0.470,cy:0.42,ax:0.028,ay:0.14,sx:0.31,sy:0.47,ph:0.0,x:0,y:0,first:true},
+  {cx:0.532,cy:0.55,ax:0.022,ay:0.17,sx:0.53,sy:0.35,ph:2.2,x:0,y:0,first:true}
+];
+canvas.addEventListener('pointerdown',e=>{ const p=toPano(e); mouse={x:p.x,y:p.y,vx:0,vy:0};
+  mouseT=performance.now(); try{canvas.setPointerCapture(e.pointerId);}catch(_){} });
+canvas.addEventListener('pointermove',e=>{ if(!mouse) return; const p=toPano(e);
+  const now=performance.now(), dtp=Math.min(0.1,Math.max(0.004,(now-mouseT)/1000)); mouseT=now;
+  let dx=p.x-mouse.x; dx-=Math.round(dx);
+  const k=1-Math.exp(-dtp/0.08);
+  mouse.vx += (dx/dtp - mouse.vx)*k; mouse.vy += ((p.y-mouse.y)/dtp - mouse.vy)*k;
+  mouse.x=p.x; mouse.y=p.y; });
+window.addEventListener('pointerup',()=>{ mouse=null; });
+
+document.querySelectorAll('[data-pal]').forEach(b=>b.addEventListener('click',()=>{
+  document.querySelectorAll('[data-pal]').forEach(x=>x.classList.remove('on'));
+  b.classList.add('on'); pal=+b.dataset.pal; }));
+document.getElementById('viewBtn').addEventListener('click',e=>{ viewFull=!viewFull;
+  e.target.textContent=viewFull?'Đang xem: CẢ 5 TƯỜNG (10350×1080)':'Đang xem: 1 TƯỜNG (560×240)'; resize(); });
+document.getElementById('clearBtn').addEventListener('click',()=>{
+  for(const t of [dye.read,dye.write,vel.read,vel.write]){ gl.bindFramebuffer(gl.FRAMEBUFFER,t.f);
+    gl.clearColor(0,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT); } gl.bindFramebuffer(gl.FRAMEBUFFER,null); });
+
+function resize(){ const w=canvas.clientWidth, view=viewFull?ASPECT:WALL;
+  const h=Math.round(w/view); canvas.style.height=h+'px';
+  const dpr=Math.min(2,window.devicePixelRatio||1);
+  canvas.width=Math.round(w*dpr); canvas.height=Math.round(h*dpr); }
+window.addEventListener('resize',resize);
+
+// ---------------------------------------------------------------- helpers
+function splat(target, x, y, r, vx, vy, vz, vw){
+  gl.useProgram(pSplat); gl.uniform2f(U(pSplat,'uTexel'), target.tx, target.ty);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, target.read.t); gl.uniform1i(U(pSplat,'uT'),0);
+  gl.uniform1f(U(pSplat,'uA'),ASPECT); gl.uniform2f(U(pSplat,'uP'),x,y);
+  gl.uniform1f(U(pSplat,'uR'),r*r); gl.uniform4f(U(pSplat,'uV'),vx,vy,vz,vw);
+  blit(target.write); target.swap();
+}
+
+let t0=performance.now(), last=t0;
+function frame(){
+  requestAnimationFrame(frame); resize();
+  const now=performance.now(); const dt=Math.min(Math.max((now-last)/1000,1/240),1/20); last=now;
+  const t=(now-t0)/1000;
+  const P=PALETTES[pal];
+
+  // hands push the fluid and inject ink
+  const hands=[];
+  for(const h of demo){
+    const x=(h.cx+h.ax*Math.sin(t*h.sx+h.ph)+1)%1, y=h.cy+h.ay*Math.sin(t*h.sy+h.ph*1.7);
+    if(h.first){h.x=x;h.y=y;h.first=false;}
+    let dx=x-h.x; dx-=Math.round(dx);
+    hands.push({x,y,vx:dx/dt,vy:(y-h.y)/dt}); h.x=x; h.y=y;
+  }
+  if(mouse) hands.push({x:mouse.x,y:mouse.y,vx:mouse.vx,vy:mouse.vy});
+
+  for(const h of hands){
+    const sp=Math.hypot(h.vx*ASPECT,h.vy);
+    const F=(2600*CFG.push)*Math.min(sp,2.5);
+    splat(vel, h.x, h.y, 0.055, h.vx*ASPECT*F*0.012, h.vy*F*0.012, 0, 1);
+    const ink=(0.26*CFG.ink)*Math.min(1,0.25+sp*1.4)*dt*60;
+    splat(dye, h.x, h.y, 0.040, P.c2[0]*ink, P.c2[1]*ink, P.c2[2]*ink, 1);
+  }
+
+  // buoyancy + turbulence
+  gl.useProgram(pForce); gl.uniform2f(U(pForce,'uTexel'),vel.tx,vel.ty);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,vel.read.t); gl.uniform1i(U(pForce,'uVel'),0);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D,dye.read.t); gl.uniform1i(U(pForce,'uDye'),1);
+  gl.uniform1f(U(pForce,'uDt'),dt); gl.uniform1f(U(pForce,'uBuoy'),22*CFG.buoy);
+  gl.uniform1f(U(pForce,'uTurb'),16*CFG.turb); gl.uniform1f(U(pForce,'uTime'),t); gl.uniform1f(U(pForce,'uA'),ASPECT);
+  blit(vel.write); vel.swap();
+
+  // vorticity confinement
+  gl.useProgram(pCurl); gl.uniform2f(U(pCurl,'uTexel'),vel.tx,vel.ty);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,vel.read.t); gl.uniform1i(U(pCurl,'uVel'),0);
+  blit(crl);
+  gl.useProgram(pVort); gl.uniform2f(U(pVort,'uTexel'),vel.tx,vel.ty);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,vel.read.t); gl.uniform1i(U(pVort,'uVel'),0);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D,crl.t); gl.uniform1i(U(pVort,'uCurl'),1);
+  gl.uniform1f(U(pVort,'uK'),32*CFG.vort); gl.uniform1f(U(pVort,'uDt'),dt);
+  blit(vel.write); vel.swap();
+
+  // projection
+  gl.useProgram(pDiv); gl.uniform2f(U(pDiv,'uTexel'),vel.tx,vel.ty);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,vel.read.t); gl.uniform1i(U(pDiv,'uVel'),0);
+  blit(div);
+  gl.useProgram(pClear); gl.uniform2f(U(pClear,'uTexel'),prs.tx,prs.ty);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,prs.read.t); gl.uniform1i(U(pClear,'uT'),0);
+  gl.uniform1f(U(pClear,'uV'),0.8); blit(prs.write); prs.swap();
+  gl.useProgram(pPrs); gl.uniform2f(U(pPrs,'uTexel'),prs.tx,prs.ty);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D,div.t); gl.uniform1i(U(pPrs,'uD'),1);
+  for(let i=0;i<24;i++){
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,prs.read.t); gl.uniform1i(U(pPrs,'uP'),0);
+    blit(prs.write); prs.swap();
+  }
+  gl.useProgram(pGrad); gl.uniform2f(U(pGrad,'uTexel'),vel.tx,vel.ty);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,prs.read.t); gl.uniform1i(U(pGrad,'uP'),0);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D,vel.read.t); gl.uniform1i(U(pGrad,'uVel'),1);
+  blit(vel.write); vel.swap();
+
+  // transport
+  gl.useProgram(pAdvect); gl.uniform2f(U(pAdvect,'uTexel'),vel.tx,vel.ty); gl.uniform1f(U(pAdvect,'uDt'),dt);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,vel.read.t); gl.uniform1i(U(pAdvect,'uVel'),0);
+  gl.uniform1i(U(pAdvect,'uSrc'),0); gl.uniform1f(U(pAdvect,'uDiss'),0.22);
+  blit(vel.write); vel.swap();
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,vel.read.t); gl.uniform1i(U(pAdvect,'uVel'),0);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D,dye.read.t); gl.uniform1i(U(pAdvect,'uSrc'),1);
+  gl.uniform1f(U(pAdvect,'uDiss'),0.30/CFG.fade);
+  blit(dye.write); dye.swap();
+
+  // velocity readback for the glitter
+  gl.useProgram(pDown); gl.uniform2f(U(pDown,'uTexel'),velRB.tx,velRB.ty);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,vel.read.t); gl.uniform1i(U(pDown,'uT'),0);
+  blit(velRB);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, velRB.f);
+  gl.readPixels(0,0,VEL_RB_W,VEL_RB_H,gl.RGBA,gl.FLOAT,velPix);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+
+  const sv={x:0,y:0}, px=Math.min(2,window.devicePixelRatio||1);
+  let gw=0;
+  for(let i=0;i<GN;i++){
+    gl_[i]+=dt; if(gl_[i]>gm[i]){ gl_[i]=0; gx[i]=Math.random(); gy[i]=Math.random(); }
+    sampleVel(gx[i],gy[i],sv);
+    gx[i]=(gx[i]+sv.x*vel.tx*dt+1)%1;
+    gy[i]=Math.min(0.995,Math.max(0.005,gy[i]+sv.y*vel.ty*dt));
+    const life=gl_[i]/gm[i];
+    const b=CFG.glit*0.9*Math.min(1,life*6)*Math.pow(1-life,1.2)*(0.4+0.6*gs[i]);
+    const o=gw*6;
+    gdata[o]=gx[i]; gdata[o+1]=gy[i];
+    gdata[o+2]=(1.2+2.4*gs[i])*px;
+    gdata[o+3]=P.glit[0]*b; gdata[o+4]=P.glit[1]*b; gdata[o+5]=P.glit[2]*b;
+    gw++;
+  }
+
+  // display
+  gl.useProgram(pShow); gl.uniform2f(U(pShow,'uTexel'),1/canvas.width,1/canvas.height);
+  const s=viewSlice();
+  gl.uniform2f(U(pShow,'uView'),s.w,s.x); gl.uniform2f(U(pShow,'uSimTexel'),dye.tx,dye.ty);
+  gl.uniform1f(U(pShow,'uExp'),P.exp*CFG.exp); gl.uniform1f(U(pShow,'uSoft'),26*CFG.soft);
+  gl.uniform1f(U(pShow,'uShadow'),1.3*CFG.shadow); gl.uniform1f(U(pShow,'uRim'),0.35);
+  gl.uniform1f(U(pShow,'uGrain'),0.010); gl.uniform1f(U(pShow,'uTime'),t); gl.uniform1f(U(pShow,'uA'),ASPECT);
+  gl.uniform3f(U(pShow,'uCol1'),...P.c1); gl.uniform3f(U(pShow,'uCol2'),...P.c2);
+  gl.uniform3f(U(pShow,'uCol3'),...P.c3); gl.uniform3f(U(pShow,'uBg'),...P.bg);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,dye.read.t); gl.uniform1i(U(pShow,'uDye'),0);
+  blit(null);
+
+  if(gw && CFG.glit>0){
+    gl.bindVertexArray(gVao); gl.bindBuffer(gl.ARRAY_BUFFER,gVbo);
+    gl.bufferSubData(gl.ARRAY_BUFFER,0,gdata.subarray(0,gw*6));
+    gl.useProgram(gProg); gl.enable(gl.BLEND); gl.blendFunc(gl.ONE,gl.ONE);
+    gl.drawArrays(gl.POINTS,0,gw); gl.disable(gl.BLEND); gl.bindVertexArray(null);
+  }
+}
+resize(); frame();
+</script>
+</body>
+</html>
